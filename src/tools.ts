@@ -174,7 +174,8 @@ export async function executeTool(
   name: string,
   args: Record<string, unknown>,
   state: ToolState,
-  delayMs: number
+  delayMs: number,
+  onStatus?: (msg: string) => void,
 ): Promise<ToolResult> {
   switch (name) {
     case "read": {
@@ -190,12 +191,12 @@ export async function executeTool(
 
       let captured = capturePage(state.imagePath, state.window);
       if (!captured) {
-        console.error("  First capture failed, retrying...");
+        onStatus?.("Capture failed, retrying...");
         await sleep(delayMs);
         captured = capturePage(state.imagePath, state.window);
       }
       if (!captured) {
-        console.error("  Window capture failed, trying full screen...");
+        onStatus?.("Trying full screen capture...");
         captured = captureScreen(state.imagePath);
       }
 
@@ -211,7 +212,7 @@ export async function executeTool(
 
       const imageBuffer = readFileSync(state.imagePath);
       const imageBase64 = imageBuffer.toString("base64");
-      console.error(`  Captured ${(imageBuffer.length / 1024).toFixed(0)} KB image`);
+      onStatus?.("Reading the page...");
 
       return {
         tool: name,
@@ -236,7 +237,7 @@ export async function executeTool(
       if (!state.visionConfig) {
         return { tool: name, output: "Error: vision config not available." };
       }
-      const result = await navigateToChapter(chapter, state, delayMs);
+      const result = await navigateToChapter(chapter, state, delayMs, onStatus);
       return { tool: name, output: result };
     }
     case "search_book": {
@@ -247,7 +248,7 @@ export async function executeTool(
       const variations = buildSearchVariations(query);
       const tried: string[] = [];
       for (const q of variations) {
-        console.error(`  search_book: trying "${q}"...`);
+        onStatus?.(`Searching for "${q}"...`);
         searchBook(q);
         tried.push(q);
         await sleep(delayMs);
@@ -268,10 +269,10 @@ export async function executeTool(
       for (let i = 0; i < count; i++) {
         const captured = capturePage(state.imagePath, state.window);
         if (!captured) {
-          console.error(`  Page ${i + 1}: capture failed, stopping.`);
+          onStatus?.(`Page ${i + 1}: capture failed`);
           break;
         }
-        console.error(`  Page ${i + 1}/${count}: reading...`);
+        onStatus?.(`Reading page ${i + 1} of ${count}...`);
 
         // Single vision call: extract text AND detect chapter boundary
         const chapterHint = i > 0
@@ -283,7 +284,7 @@ export async function executeTool(
 
         const raw = await askVision(state.imagePath, state.visionConfig!, prompt, 4096);
         if (!raw || raw === "unknown") {
-          console.error(`  Page ${i + 1}: empty response, stopping.`);
+          onStatus?.(`Page ${i + 1}: no response`);
           break;
         }
 
@@ -293,7 +294,7 @@ export async function executeTool(
           const isNewChapter = /NEW_CHAPTER:\s*YES/i.test(raw);
           if (isNewChapter) {
             stoppedReason = `Stopped: new chapter detected on page ${i + 1}.`;
-            console.error(`  ${stoppedReason}`);
+            onStatus?.(stoppedReason);
             turnPageBack();
             break;
           }
@@ -304,7 +305,7 @@ export async function executeTool(
         }
 
         if (!text) {
-          console.error(`  Page ${i + 1}: no text extracted, stopping.`);
+          onStatus?.(`Page ${i + 1}: empty`);
           break;
         }
 
@@ -335,9 +336,10 @@ async function navigateToChapter(
   target: number,
   state: ToolState,
   delayMs: number,
+  onStatus?: (msg: string) => void,
 ): Promise<string> {
   const MAX_PAGES = 150;
-  console.error(`  go_to_chapter: looking for chapter ${target}...`);
+  onStatus?.(`Looking for Chapter ${target}...`);
 
   // First, check if we're already on the target chapter
   let captured = capturePage(state.imagePath, state.window);
@@ -355,7 +357,8 @@ async function navigateToChapter(
   }
 
   const direction = !isNaN(currentChapter) && currentChapter > target ? "back" : "forward";
-  console.error(`  go_to_chapter: current chapter ≈ ${isNaN(currentChapter) ? "unknown" : currentChapter}, going ${direction}...`);
+  const dirLabel = direction === "back" ? "backward" : "forward";
+  onStatus?.(`Currently at Chapter ${isNaN(currentChapter) ? "?" : currentChapter}, turning ${dirLabel}...`);
 
   for (let i = 1; i <= MAX_PAGES; i++) {
     if (direction === "back") {
@@ -368,10 +371,10 @@ async function navigateToChapter(
     captured = capturePage(state.imagePath, state.window);
     if (!captured) continue;
 
-    console.error(`  go_to_chapter: page ${i} ${direction}...`);
+    onStatus?.(`Turning ${dirLabel}... (${i} pages)`);
 
     if (await isChapterStart(state, target)) {
-      console.error(`  go_to_chapter: found chapter ${target} after ${i} page(s) ${direction}.`);
+      onStatus?.(`Found Chapter ${target}!`);
       return `Navigated to chapter ${target} (turned ${i} pages ${direction}).`;
     }
   }

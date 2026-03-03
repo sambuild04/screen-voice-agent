@@ -17,7 +17,9 @@
     "chat": "tsx src/index.ts chat"
   },
   "dependencies": {
-    "commander": "^12.1.0"
+    "@clack/prompts": "^1.0.1",
+    "commander": "^12.1.0",
+    "picocolors": "^1.1.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

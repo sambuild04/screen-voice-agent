@@ -4,6 +4,10 @@ An AI-powered book reading assistant for macOS. Open a book in Apple Books, talk
 
 Built with OpenAI's vision and TTS APIs, Peekaboo for screen capture and UI automation, and a model-driven agent loop where the LLM decides which tools to call.
 
+## Demo
+
+https://github.com/sambuild04/reading-ai-agent/raw/main/demo.mp4
+
 ## How It Works
 
 ```

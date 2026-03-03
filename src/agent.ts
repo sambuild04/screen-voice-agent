@@ -10,6 +10,16 @@ import { getConfig, getVisionConfig } from "./config.js";
 import type { VisionConfig } from "./vision.js";
 import { buildToolAvailabilityPrompt } from "./tools-help.js";
 
+const TOOL_LABELS: Record<string, string> = {
+  read: "Capturing page...",
+  read_pages: "Reading pages...",
+  next_page: "Turning page...",
+  prev_page: "Going back...",
+  scroll_down: "Scrolling...",
+  go_to_chapter: "Navigating to chapter...",
+  search_book: "Searching...",
+};
+
 function buildSystemPrompt(): string {
   const now = new Date();
   const hour = now.getHours();
@@ -46,6 +56,8 @@ interface AgentOptions {
   onText?: (text: string) => void | Promise<void>;
   /** Called per-token as the LLM streams its response. */
   onStream?: (token: string) => void;
+  /** Called with status updates for UI display (spinners, progress). */
+  onStatus?: (msg: string) => void;
   onPageImage?: (base64: string) => void;
   focus?: boolean;
   pages?: number;
@@ -70,6 +82,7 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
     maxIterations = 10,
     onText,
     onStream,
+    onStatus,
     onPageImage,
     focus = true,
     pages,
@@ -107,15 +120,17 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
       console.error("Switch to the book window. Capturing in 5 seconds...");
       await new Promise((r) => setTimeout(r, 5000));
     } else if (focus) {
-      console.error("Finding book reader window...");
+      onStatus?.("Finding book window...");
       bookWindow = focusBookReader();
       if (!bookWindow) {
-        console.error("Could not find book reader (using default). Ensure a book is open.");
+        onStatus?.("No book window found, opening Books...");
         focusBooks();
+      } else {
+        onStatus?.(`Found "${bookWindow.title}"`);
       }
       const delayMs = warmStart ? 500 : config.delayMs ?? 1500;
       if (delayMs > 0) {
-        console.error(`Waiting ${delayMs / 1000}s for window...`);
+        onStatus?.("Preparing...");
         await new Promise((r) => setTimeout(r, delayMs));
       }
     }
@@ -143,7 +158,7 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
 
     while (iterations < maxIterations) {
       iterations++;
-      if (iterations === 1) console.error("Calling LLM...");
+      if (iterations === 1 && onStatus) onStatus("Thinking...");
 
       const response = await chatWithTools(messages, visionConfig, onStream);
 
@@ -173,7 +188,8 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
       const pendingImages: Array<{ base64: string }> = [];
 
       for (const tc of response.toolCalls) {
-        console.error(`  → ${tc.name}()`);
+        const toolLabel = TOOL_LABELS[tc.name] ?? tc.name;
+        if (onStatus) onStatus(toolLabel);
 
         const needsFocus = ["read", "read_pages", "next_page", "prev_page", "scroll_down", "search_book", "go_to_chapter"].includes(tc.name);
         if (needsFocus) {
@@ -181,7 +197,7 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
           state.window = bookWindow;
         }
         const args = parseJson(tc.arguments || "{}");
-        const result = await executeTool(tc.name, args, state, config.delayMs ?? 800);
+        const result = await executeTool(tc.name, args, state, config.delayMs ?? 800, onStatus);
 
         // All tool results must come first (OpenAI requirement)
         messages.push({
@@ -211,7 +227,7 @@ export async function runAgent(options: AgentOptions = {}): Promise<Message[]> {
     }
 
     if (iterations >= maxIterations) {
-      console.error("Max iterations reached.");
+      onStatus?.("Reached iteration limit");
     }
     if (!didOutputText && onText) {
       await onText("(No response from the assistant. Try again.)");

@@ -16,6 +16,7 @@ import { extractTextFromImage } from "./vision.js";
 import { getConfig, getVisionConfig } from "./config.js";
 import { runAgent, type Message } from "./agent.js";
 import { speak } from "./speak.js";
+import { createStatusSpinner, greeting as renderGreeting, c, icons } from "./ui.js";
 
 program
   .name("reader")
@@ -49,16 +50,23 @@ program
     const wantSpeak =
       opts.speak !== false &&
       (ttsProvider === "say" || (ttsProvider === "openai" && ttsKey) || /aloud|out loud|speak|read to me/i.test(instruction));
+    const spin = createStatusSpinner();
     let streamed = false;
     const onStream = (token: string) => {
+      if (spin.isActive()) spin.clear();
       streamed = true;
       process.stdout.write(token);
     };
+    const onStatus = (msg: string) => {
+      if (!spin.isActive()) spin.start(msg);
+      else spin.update(msg);
+    };
     const onText = async (text: string) => {
+      if (spin.isActive()) spin.clear();
       if (streamed) {
         process.stdout.write("\n");
       } else {
-        console.log(text);
+        console.log(c.samuel(text));
       }
       if (wantSpeak) {
         try {
@@ -71,7 +79,7 @@ program
             speed: config.ttsSpeed,
           });
         } catch {
-          console.error("(TTS unavailable)");
+          console.error(c.dim("(TTS unavailable)"));
         }
       }
     };
@@ -83,6 +91,7 @@ program
         waitForReady: false,
         onText,
         onStream,
+        onStatus,
       });
     } catch (err) {
       console.error("Error:", (err as Error).message);
@@ -208,10 +217,15 @@ program
     const readline = await import("node:readline/promises");
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     let sessionHistory: Message[] = [];
-    const hour = new Date().getHours();
-    const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-    const greetingText = `${greeting}, sir. Samuel at your service. What shall we read today?`;
-    console.error(`${greetingText}\n`);
+
+    // Styled greeting
+    console.error(renderGreeting());
+    console.error();
+    const greetingText = (() => {
+      const hour = new Date().getHours();
+      const g = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+      return `${g}, sir. Samuel at your service. What shall we read today?`;
+    })();
     const speakGreeting =
       opts.speak !== false && (ttsProvider === "say" || (ttsProvider === "openai" && ttsKey));
     if (speakGreeting) {
@@ -225,40 +239,47 @@ program
           speed: config.ttsSpeed,
         });
       } catch {
-        console.error("(TTS unavailable — continuing without voice)");
+        console.error(c.dim("(TTS unavailable — continuing without voice)"));
       }
     }
     while (true) {
       let input: string;
       try {
-        input = (await rl.question("> ")).trim();
+        input = (await rl.question(c.prompt("> "))).trim();
       } catch {
         break;
       }
       if (!input) continue;
       const lower = input.toLowerCase();
       if (lower === "exit" || lower === "quit" || lower === "q") {
-        console.error("Bye.");
+        console.error(c.dim("Until next time, sir."));
         break;
       }
       if (lower === "clear" || lower === "reset") {
         sessionHistory = [];
-        console.error("Session cleared.");
+        console.error(c.dim("Session cleared."));
         continue;
       }
       const wantSpeak =
         opts.speak !== false &&
         (ttsProvider === "say" || (ttsProvider === "openai" && ttsKey) || /aloud|out loud|speak|read to me/i.test(input));
+      const spin = createStatusSpinner();
       let streamed = false;
       const onStream = (token: string) => {
+        if (spin.isActive()) spin.clear();
         streamed = true;
         process.stdout.write(token);
       };
+      const onStatus = (msg: string) => {
+        if (!spin.isActive()) spin.start(msg);
+        else spin.update(msg);
+      };
       const onText = async (text: string) => {
+        if (spin.isActive()) spin.clear();
         if (streamed) {
           process.stdout.write("\n");
         } else {
-          console.log(text);
+          console.log(c.samuel(text));
         }
         if (wantSpeak) {
           try {
@@ -267,14 +288,14 @@ program
               apiKey: ttsKey,
               voice: config.ttsVoice,
               model: config.ttsModel,
-            instructions: config.ttsInstructions,
-            speed: config.ttsSpeed,
-          });
-        } catch {
-          console.error("(TTS unavailable)");
+              instructions: config.ttsInstructions,
+              speed: config.ttsSpeed,
+            });
+          } catch {
+            console.error(c.dim("(TTS unavailable)"));
+          }
         }
-      }
-    };
+      };
       try {
         sessionHistory = await runAgent({
           maxIterations: 10,
@@ -284,10 +305,12 @@ program
           warmStart: sessionHistory.length > 0,
           onText,
           onStream,
+          onStatus,
           history: sessionHistory,
         });
       } catch (err) {
-        console.error("Error:", (err as Error).message);
+        if (spin.isActive()) spin.fail("Error");
+        console.error(c.error(`Error: ${(err as Error).message}`));
       }
     }
     rl.close();
