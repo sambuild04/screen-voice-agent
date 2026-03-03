@@ -6,7 +6,7 @@ Built with OpenAI's vision and TTS APIs, Peekaboo for screen capture and UI auto
 
 ## Demo
 
-https://github.com/sambuild04/reading-ai-agent/raw/main/demo.mp4
+https://github.com/user-attachments/assets/60363bb7-9371-4580-802f-e3681aadce1c
 
 ## How It Works
 
