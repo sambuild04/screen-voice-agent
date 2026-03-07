@@ -28,6 +28,34 @@ html, body, #root {
   animation: pulse-ring 1.5s ease-in-out infinite;
 }
 
+/* Thinking dots — gentle bounce */
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-6px); opacity: 1; }
+}
+
+.thinking-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #06b6d4;
+  animation: thinking-bounce 1.2s ease-in-out infinite;
+}
+
+/* Waveform bars — listening indicator */
+@keyframes waveform {
+  0%, 100% { height: 4px; opacity: 0.3; }
+  50% { height: 16px; opacity: 0.8; }
+}
+
+.waveform-bar {
+  width: 3px;
+  height: 4px;
+  border-radius: 2px;
+  background: #22d3ee;
+  animation: waveform 1s ease-in-out infinite;
+}
+
 /* Scroll anchor for transcript */
 .transcript-scroll {
   scroll-behavior: smooth;

@@ -28,7 +28,7 @@ export default function App() {
       </div>
 
       {/* Transcript */}
-      <Transcript entries={transcript} />
+      <Transcript entries={transcript} agentState={agentState} />
 
       {/* Controls */}
       <Controls
