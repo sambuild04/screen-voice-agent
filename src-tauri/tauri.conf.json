@@ -1,0 +1,38 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Samuel",
+  "version": "0.1.0",
+  "identifier": "com.samuel.bookreader",
+  "build": {
+    "frontendDist": "../dist-ui",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run ui:dev",
+    "beforeBuildCommand": "npm run ui:build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Samuel",
+        "width": 480,
+        "height": 720,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+@import "tailwindcss";
+
+@theme {
+  --color-samuel: #06b6d4;
+  --color-samuel-dim: #155e75;
+  --color-surface: #0f172a;
+  --color-surface-elevated: #1e293b;
+  --color-surface-hover: #334155;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-surface);
+  color: #e2e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Pulse animation for the speaking indicator */
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 0.3; }
+  100% { transform: scale(1); opacity: 0.6; }
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.5s ease-in-out infinite;
+}
+
+/* Scroll anchor for transcript */
+.transcript-scroll {
+  scroll-behavior: smooth;
+}

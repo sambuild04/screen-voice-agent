@@ -16,12 +16,15 @@ You speak/type → LLM picks tools → Peekaboo acts on Apple Books → Screensh
 
 The agent loop sends your request to the LLM along with available tools. The model decides what to do — capture a page, flip forward, navigate to a chapter, search for text — executes the actions via Peekaboo, then reads the resulting screenshot with its vision capabilities and responds.
 
+**Voice mode** uses OpenAI's Realtime API (`gpt-4o-realtime-preview`) for true speech-to-speech interaction — your voice goes directly to the model, and Samuel responds with natural speech. No intermediate transcription step. The model hears your tone and intent and responds instantly.
+
 ## Requirements
 
 - **macOS** (Apple Books + Peekaboo)
 - **Node.js** 20+
 - **Peekaboo** for screen capture and UI automation
 - **OpenAI API key** (or Anthropic)
+- **sox** (for voice mode microphone recording) — install with `brew install sox`
 
 ## Setup
 
@@ -83,6 +86,28 @@ You can also use `ANTHROPIC_API_KEY` for Anthropic's Claude models.
 ## Usage
 
 Open a book in Apple Books first, then:
+
+### Voice mode (speech-to-speech)
+
+```bash
+npm run voice
+```
+
+Samuel listens through your microphone and responds with natural speech — a real conversation. Just speak naturally:
+
+- "Samuel, read the current page"
+- "Go to chapter 4"
+- "What was that last part about?"
+- Press **Ctrl+C** to exit
+
+Voice mode uses OpenAI's Realtime API for ~300-500ms latency. You can interrupt Samuel mid-sentence by speaking.
+
+Options:
+```bash
+# Choose a different voice
+npm run voice -- --voice marin
+# Available: ash (default), marin, coral, echo, sage, alloy, ballad, shimmer, verse, cedar
+```
 
 ### Interactive chat (recommended)
 
@@ -147,14 +172,18 @@ The model chains tools as needed. For example, "go to chapter 4 and read the fir
 
 ```
 src/
-├── index.ts        CLI entry point and command definitions
-├── agent.ts        Agent loop: LLM ↔ tool execution ↔ streaming
-├── tools.ts        Tool definitions and execution logic
-├── tools-help.ts   Tool summaries injected into the system prompt
-├── peekaboo.ts     Peekaboo wrapper (capture, keystrokes, search)
-├── vision.ts       Vision API calls (OCR text extraction)
-├── config.ts       Config loading (~/.books-reader.json + env vars)
-└── speak.ts        Text-to-speech (OpenAI TTS or macOS say)
+├── index.ts          CLI entry point and command definitions
+├── agent.ts          Agent loop: LLM ↔ tool execution ↔ streaming
+├── realtime.ts       Realtime API voice session (WebSocket, audio I/O, tools)
+├── mic.ts            Microphone recording via sox (PCM16 at 24kHz)
+├── audio-player.ts   Audio playback via sox (PCM16 streaming)
+├── tools.ts          Tool definitions and execution logic
+├── tools-help.ts     Tool summaries injected into the system prompt
+├── peekaboo.ts       Peekaboo wrapper (capture, keystrokes, search)
+├── vision.ts         Vision API calls (OCR text extraction)
+├── config.ts         Config loading (~/.books-reader.json + env vars)
+├── speak.ts          Text-to-speech (OpenAI TTS or macOS say)
+└── ui.ts             Terminal UI (spinner, colors, greeting)
 ```
 
 **Agent loop** (`agent.ts`):
@@ -166,6 +195,13 @@ src/
 **Vision-based chapter detection**: When navigating chapters or reading multiple pages, the agent asks the vision model directly — "Is this the first page of Chapter 4?" — rather than relying on OCR + regex. One API call per page handles both text extraction and chapter boundary detection.
 
 **Session history**: Conversation context persists across turns within a chat session. Old screenshots are replaced with text placeholders to keep the context window manageable.
+
+**Realtime voice** (`realtime.ts`):
+- Opens a WebSocket to OpenAI's Realtime API (`gpt-4o-realtime-preview`)
+- Streams microphone audio (via sox `rec`) as PCM16 at 24kHz
+- Plays model audio responses (via sox `play`) in real time
+- Server-side VAD detects when you stop speaking and triggers a response
+- Book-reading tools are registered as Realtime API function tools — when the model decides to read a page, it calls the tool, receives the screenshot as an image, and describes what it sees
 
 ## Limitations
 

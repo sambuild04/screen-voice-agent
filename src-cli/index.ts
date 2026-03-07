@@ -392,4 +392,73 @@ program
     }
   });
 
+program
+  .command("voice")
+  .description("Real-time voice mode: speak naturally to Samuel using your microphone")
+  .option("--voice <voice>", "Realtime API voice (ash, marin, coral, echo, sage, etc.)", "ash")
+  .option("--vad <mode>", "Voice activity detection: semantic_vad (default) or server_vad", "semantic_vad")
+  .action(async (opts) => {
+    if (!checkPeekaboo()) {
+      console.error(
+        "Error: Peekaboo is not installed or lacks permissions.\n" +
+          "Install: brew install steipete/tap/peekaboo\n" +
+          "Grant: Screen Recording + Accessibility in System Settings"
+      );
+      process.exit(1);
+    }
+
+    let config: ReturnType<typeof getConfig>;
+    try {
+      config = getConfig();
+    } catch (err) {
+      console.error("Error:", (err as Error).message);
+      process.exit(1);
+    }
+
+    const apiKey = config.apiKey;
+    if (!apiKey) {
+      console.error("Error: OpenAI API key required for voice mode.");
+      process.exit(1);
+    }
+
+    // Dynamic import to avoid loading ws for non-voice commands
+    const { startRealtimeSession } = await import("./realtime.js");
+
+    console.error(renderGreeting());
+    console.error();
+    console.error(c.accent("  Voice mode — speak naturally. Press Ctrl+C to exit."));
+    console.error();
+
+    try {
+      const cleanup = await startRealtimeSession({
+        apiKey,
+        voice: opts.voice,
+        vadMode: opts.vad,
+        onStatus(msg) {
+          process.stderr.write(`\r\x1b[K${c.dim(`  ${msg}`)}`);
+        },
+        onTranscript(text, role) {
+          process.stderr.write("\r\x1b[K");
+          if (role === "user") {
+            console.error(c.dim(`  You: ${text}`));
+          } else {
+            console.error(c.samuel(`  Samuel: ${text}`));
+          }
+        },
+      });
+
+      // Keep alive until Ctrl+C
+      const exit = () => {
+        console.error(c.dim("\n  Until next time, sir."));
+        cleanup();
+        process.exit(0);
+      };
+      process.on("SIGINT", exit);
+      process.on("SIGTERM", exit);
+    } catch (err) {
+      console.error(c.error(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+  });
+
 program.parse();
