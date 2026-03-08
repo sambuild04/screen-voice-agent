@@ -1,8 +1,8 @@
-# Reading AI Agent
+# Samuel — AI Book Reading Assistant
 
-An AI-powered book reading assistant for macOS. Open a book in Apple Books, talk to **Samuel** — your personal reading butler — and he'll read pages, navigate chapters, search for keywords, summarize content, and speak it all aloud.
+A voice-powered AI reading assistant for macOS. Open a book in Apple Books, launch the app, and talk to **Samuel** — your personal reading butler. He reads pages, navigates chapters, searches for keywords, summarizes entire chapters, and speaks it all aloud in real time.
 
-Built with OpenAI's vision and TTS APIs, Peekaboo for screen capture and UI automation, and a model-driven agent loop where the LLM decides which tools to call.
+Built as a Tauri desktop app with OpenAI's Realtime API for voice, GPT-5.4 Computer Use for visual navigation, and GPT-4o Vision for reading.
 
 ## Demo
 
@@ -11,20 +11,52 @@ https://github.com/user-attachments/assets/60363bb7-9371-4580-802f-e3681aadce1c
 ## How It Works
 
 ```
-You speak/type → LLM picks tools → Peekaboo acts on Apple Books → Screenshot → LLM reads the image → Samuel responds (text + voice)
+You speak → Realtime API (gpt-realtime) → Samuel picks tools → Action executes → Samuel responds with voice
 ```
 
-The agent loop sends your request to the LLM along with available tools. The model decides what to do — capture a page, flip forward, navigate to a chapter, search for text — executes the actions via Peekaboo, then reads the resulting screenshot with its vision capabilities and responds.
+Samuel is a voice agent powered by OpenAI's Agents SDK (`@openai/agents/realtime`). He listens through your microphone and responds with natural speech in real time. When you ask him to do something with your book, he picks the right tool:
 
-**Voice mode** uses OpenAI's Realtime API (`gpt-4o-realtime-preview`) for true speech-to-speech interaction — your voice goes directly to the model, and Samuel responds with natural speech. No intermediate transcription step. The model hears your tone and intent and responds instantly.
+| Request | Tool | How |
+|---|---|---|
+| "Read this page" | `read_page` | GPT-4o Vision captures + transcribes the page (~3s) |
+| "Summarize chapter 9" | `read_chapter` | Loops Vision API reads + page turns until next chapter heading |
+| "Go to chapter 6" | `interact_with_book` | GPT-5.4 Computer Use sees the screen and navigates visually |
+| "Turn the page" | `next_page` | Instant hotkey via Peekaboo |
+| "Search for 'marketing'" | `interact_with_book` | GPT-5.4 drives Apple Books search UI |
+
+## Features
+
+### Voice Conversation
+- Real-time speech-to-speech via OpenAI Realtime API
+- Natural voice (configurable — default "ash")
+- Server-side VAD with echo cancellation and noise reduction
+- Samuel speaks with a polished British butler persona
+
+### Smart Reading
+- **Single page**: GPT-4o Vision captures and transcribes the current page
+- **Full chapter**: Automatically reads every page, turning them one by one, and stops when it detects the next chapter heading
+- **Partial reading**: "Read the first sentence" — reads the page, speaks only the requested portion
+- **Follow-up questions**: Answers from memory without re-reading
+
+### Visual Navigation (GPT-5.4 Computer Use)
+- Sees the actual screen and clicks, types, scrolls through Apple Books
+- Navigate to any chapter by visually finding it
+- Open table of contents, search for text, interact with any UI element
+- Autonomous multi-step navigation without brittle hotkey sequences
+
+### UI
+- Live transcript with user and assistant messages
+- Visual state indicators: listening (waveform), thinking (bouncing dots), speaking
+- Auto-scrolling conversation view
+- Connect/disconnect and mute controls
 
 ## Requirements
 
 - **macOS** (Apple Books + Peekaboo)
 - **Node.js** 20+
+- **Rust** (for Tauri — install via [rustup.rs](https://rustup.rs))
 - **Peekaboo** for screen capture and UI automation
-- **OpenAI API key** (or Anthropic)
-- **sox** (for voice mode microphone recording) — install with `brew install sox`
+- **OpenAI API key** with access to GPT-4o, Realtime API, and GPT-5.4
 
 ## Setup
 
@@ -38,178 +70,117 @@ Grant permissions when prompted:
 - **Screen Recording** — so Peekaboo can capture screenshots
 - **Accessibility** — so Peekaboo can send keystrokes and clicks
 
-Verify with:
+Verify:
 ```bash
 peekaboo permissions
 ```
 
-### 2. Install dependencies
+### 2. Install Rust
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+### 3. Install dependencies
 
 ```bash
 cd reading-ai-agent
 npm install
 ```
 
-### 3. Set your API key
+### 4. Set your API key
 
-**Option A — environment variable (recommended):**
+Create `~/.books-reader.json`:
+
+```json
+{
+  "apiKey": "sk-..."
+}
+```
+
+Or set the environment variable:
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 ```
 
-**Option B — config file** at `~/.books-reader.json`:
+### 5. Grant Screen Recording permission
 
-```json
-{
-  "provider": "openai",
-  "apiKey": "sk-..."
-}
-```
+The Tauri app needs Screen Recording access to capture Apple Books pages. Go to:
 
-The config file supports these fields:
+**System Settings → Privacy & Security → Screen Recording** → add the `samuel` binary (found at `src-tauri/target/debug/samuel` during development).
 
-| Field | Default | Description |
-|---|---|---|
-| `provider` | `"openai"` | Vision provider: `"openai"` or `"anthropic"` |
-| `apiKey` | — | API key for the vision provider |
-| `model` | `"gpt-4o-mini"` | Model for vision and chat |
-| `delayMs` | `800` | Delay (ms) between page turns for capture timing |
-| `ttsProvider` | `"openai"` | Text-to-speech: `"openai"` or `"say"` (macOS built-in) |
-| `ttsVoice` | `"onyx"` | Voice name (`"onyx"`, `"nova"`, `"echo"` for OpenAI; `"Fred"`, `"Daniel"` for macOS) |
-| `ttsModel` | `"gpt-4o-mini-tts"` | OpenAI TTS model |
-| `ttsInstructions` | — | Custom voice instructions (tone, pacing) |
-| `ttsSpeed` | `1.25` | Playback speed (0.25–4.0) |
-
-You can also use `ANTHROPIC_API_KEY` for Anthropic's Claude models.
+Also ensure `peekaboo` is listed there.
 
 ## Usage
 
-Open a book in Apple Books first, then:
-
-### Voice mode (speech-to-speech)
+Open a book in Apple Books, then:
 
 ```bash
-npm run voice
+npm run tauri:dev
 ```
 
-Samuel listens through your microphone and responds with natural speech — a real conversation. Just speak naturally:
+Click **Connect** and start talking:
 
 - "Samuel, read the current page"
+- "Summarize chapter 9 for me"
 - "Go to chapter 4"
-- "What was that last part about?"
-- Press **Ctrl+C** to exit
-
-Voice mode uses OpenAI's Realtime API for ~300-500ms latency. You can interrupt Samuel mid-sentence by speaking.
-
-Options:
-```bash
-# Choose a different voice
-npm run voice -- --voice marin
-# Available: ash (default), marin, coral, echo, sage, alloy, ballad, shimmer, verse, cedar
-```
-
-### Interactive chat (recommended)
-
-```bash
-npm run chat
-```
-
-Samuel greets you and waits for instructions. Examples:
-
-```
-> read the first sentence
-> next page
-> go to chapter 4 and read the first paragraph
-> read chapter 5 and tell me what it's about
-> find the part about marketing
-> what does that mean? explain in Chinese
-> exit
-```
-
-Type `clear` or `reset` to wipe session history. Type `exit` or `quit` to leave.
-
-### One-shot commands
-
-```bash
-# Read current page
-npm run dev -- "read this page"
-
-# Read and speak aloud
-npm run dev -- "read the first paragraph" --speak
-
-# Navigate to a chapter
-npm run dev -- "go to chapter 3"
-```
-
-### Fixed pipeline (no agent, just OCR)
-
-```bash
-# Read 5 pages sequentially
-npm run dev -- pages --pages 5
-
-# Read with speech
-npm run dev -- pages --pages 3 --speak
-```
-
-## Tools
-
-The LLM has access to these tools and decides when to use them:
-
-| Tool | What it does |
-|---|---|
-| `read` | Captures the current page as a screenshot. The LLM reads the text from the image. |
-| `next_page` | Flips one page forward. |
-| `prev_page` | Flips one page backward. |
-| `scroll_down` | Scrolls down (for PDF-style books). |
-| `go_to_chapter` | Navigates to a chapter by number. Turns pages one by one, asking the vision model on each page if it's the target chapter. |
-| `search_book` | Opens Cmd+F search in Apple Books, pastes the query, jumps to the first match. |
-| `read_pages` | Reads multiple pages sequentially. Automatically detects chapter boundaries and stops. |
-
-The model chains tools as needed. For example, "go to chapter 4 and read the first sentence" triggers `go_to_chapter(4)` then `read()`.
+- "Search for the word 'traction'"
+- "What did that last part mean?"
+- "Turn to the next page and read it"
 
 ## Architecture
 
 ```
-src/
-├── index.ts          CLI entry point and command definitions
-├── agent.ts          Agent loop: LLM ↔ tool execution ↔ streaming
-├── realtime.ts       Realtime API voice session (WebSocket, audio I/O, tools)
-├── mic.ts            Microphone recording via sox (PCM16 at 24kHz)
-├── audio-player.ts   Audio playback via sox (PCM16 streaming)
-├── tools.ts          Tool definitions and execution logic
-├── tools-help.ts     Tool summaries injected into the system prompt
-├── peekaboo.ts       Peekaboo wrapper (capture, keystrokes, search)
-├── vision.ts         Vision API calls (OCR text extraction)
-├── config.ts         Config loading (~/.books-reader.json + env vars)
-├── speak.ts          Text-to-speech (OpenAI TTS or macOS say)
-└── ui.ts             Terminal UI (spinner, colors, greeting)
+src/                          React frontend (Vite + TypeScript)
+├── App.tsx                   Main app layout
+├── hooks/useRealtime.ts      Realtime API connection, audio I/O, transcript
+├── lib/samuel.ts             Agent definition: persona, tools, instructions
+├── components/
+│   ├── Transcript.tsx        Chat bubbles + state indicators
+│   ├── Controls.tsx          Connect/disconnect/mute buttons
+│   └── StatusBar.tsx         Connection + agent state display
+└── styles/app.css            Animations (thinking dots, waveform bars)
+
+src-tauri/                    Rust backend (Tauri v2)
+└── src/
+    ├── lib.rs                Tauri command registration
+    └── commands.rs           All backend logic:
+                              - Peekaboo wrappers (capture, hotkeys, click)
+                              - GPT-4o Vision API (analyze_page)
+                              - GPT-5.4 Computer Use loop (computer_use_task)
+                              - Ephemeral key minting for Realtime API
+                              - Apple Books activation and window management
 ```
 
-**Agent loop** (`agent.ts`):
-1. User message + conversation history + system prompt sent to the LLM with `tool_choice: "auto"`
-2. LLM returns either text (done) or tool calls
-3. Tools are executed, results fed back to the LLM
-4. Loop until the LLM responds with text or max iterations reached
+### Tool Architecture
 
-**Vision-based chapter detection**: When navigating chapters or reading multiple pages, the agent asks the vision model directly — "Is this the first page of Chapter 4?" — rather than relying on OCR + regex. One API call per page handles both text extraction and chapter boundary detection.
+| Tool | Backend | Model | Speed | Best for |
+|---|---|---|---|---|
+| `read_page` | Vision API (`gpt-4o`) | Single API call | ~3s | Reading one page |
+| `read_chapter` | Vision API loop | Multiple API calls | ~3s/page | Reading full chapters |
+| `interact_with_book` | Responses API (`gpt-5.4`) | CUA loop | ~5-10s/turn | Navigation, search, complex UI |
+| `next_page` / `prev_page` | Peekaboo hotkey | None | Instant | Simple page turns |
 
-**Session history**: Conversation context persists across turns within a chat session. Old screenshots are replaced with text placeholders to keep the context window manageable.
+### Why Two Models?
 
-**Realtime voice** (`realtime.ts`):
-- Opens a WebSocket to OpenAI's Realtime API (`gpt-4o-realtime-preview`)
-- Streams microphone audio (via sox `rec`) as PCM16 at 24kHz
-- Plays model audio responses (via sox `play`) in real time
-- Server-side VAD detects when you stop speaking and triggers a response
-- Book-reading tools are registered as Realtime API function tools — when the model decides to read a page, it calls the tool, receives the screenshot as an image, and describes what it sees
+- **GPT-4o Vision** (`read_page`, `read_chapter`): Fast text extraction with high output token limits. One API call per page. Ideal for reading.
+- **GPT-5.4 Computer Use** (`interact_with_book`): Sees the screen and performs UI actions (click, type, scroll). Ideal for navigation but slower per turn and has lower output limits.
+
+## Planned Features
+
+- **Animated character**: Rive-based Samuel avatar with facial expressions mapped to agent states (idle, listening, thinking, speaking)
+- **Wake word**: "Hey Samuel" activation via local wake word detection (Picovoice Porcupine), eliminating echo issues entirely
+- **Sound cues**: Subtle chime on activation, thinking hum during processing
+- **Auto-connect**: Connect to voice agent automatically on app launch
 
 ## Limitations
 
 - **macOS only** — relies on Apple Books and Peekaboo
 - **DRM** — protected books may produce black screenshots
-- **Page mode** — uses arrow keys for page turns; scroll-mode PDFs use `scroll_down` instead
-- **Vision model accuracy** — chapter detection depends on the model recognizing headings, which can occasionally miss stylized or decorative fonts
-- **API costs** — each page read or chapter navigation step makes a vision API call
+- **API costs** — each page read makes a Vision API call; chapter reads make one per page; CUA navigation makes multiple calls per task
+- **GPT-5.4 access** — Computer Use requires API access to GPT-5.4 (launched March 2026)
 
 ## License
 
