@@ -1,8 +1,8 @@
 # Samuel — AI Book Reading Assistant
 
-A voice-powered AI reading assistant for macOS. Open a book in Apple Books, launch the app, and talk to **Samuel** — your personal reading butler. He reads pages, navigates chapters, searches for keywords, summarizes entire chapters, and speaks it all aloud in real time.
+A voice-powered AI reading assistant for macOS. Open a book in Apple Books, launch the app, and say **"Hey Samuel"** — your personal reading butler wakes up, reads pages, navigates chapters, searches for keywords, summarizes entire chapters, and speaks it all aloud in real time.
 
-Built as a Tauri desktop app with OpenAI's Realtime API for voice, GPT-5.4 Computer Use for visual navigation, and GPT-4o Vision for reading.
+Built as a Tauri desktop app with OpenAI's Realtime API for voice, GPT-5.4 Computer Use for visual navigation, GPT-4o Vision for reading, and Whisper-powered wake word detection.
 
 ## Demo
 
@@ -25,6 +25,12 @@ Samuel is a voice agent powered by OpenAI's Agents SDK (`@openai/agents/realtime
 | "Search for 'marketing'" | `interact_with_book` | GPT-5.4 drives Apple Books search UI |
 
 ## Features
+
+### "Hey Samuel" Wake Word
+- Hands-free activation — just say "Hey Samuel" and the assistant connects
+- Uses Web Audio API + OpenAI Whisper for continuous speech detection
+- Plays a chime on activation and a soft tone when going idle
+- Automatically returns to listening mode after inactivity
 
 ### Voice Conversation
 - Real-time speech-to-speech via OpenAI Realtime API
@@ -121,7 +127,7 @@ Open a book in Apple Books, then:
 npm run tauri:dev
 ```
 
-Click **Connect** and start talking:
+Say **"Hey Samuel"** and start talking:
 
 - "Samuel, read the current page"
 - "Summarize chapter 9 for me"
@@ -134,9 +140,13 @@ Click **Connect** and start talking:
 
 ```
 src/                          React frontend (Vite + TypeScript)
-├── App.tsx                   Main app layout
-├── hooks/useRealtime.ts      Realtime API connection, audio I/O, transcript
-├── lib/samuel.ts             Agent definition: persona, tools, instructions
+├── App.tsx                   Main app layout + wake word flow
+├── hooks/
+│   ├── useRealtime.ts        Realtime API connection, audio I/O, transcript
+│   └── useWakeWord.ts        "Hey Samuel" detection (MediaRecorder + Whisper)
+├── lib/
+│   ├── samuel.ts             Agent definition: persona, tools, instructions
+│   └── sounds.ts             Sound cues (chime on wake, tone on idle)
 ├── components/
 │   ├── Transcript.tsx        Chat bubbles + state indicators
 │   ├── Controls.tsx          Connect/disconnect/mute buttons
@@ -146,12 +156,13 @@ src/                          React frontend (Vite + TypeScript)
 src-tauri/                    Rust backend (Tauri v2)
 └── src/
     ├── lib.rs                Tauri command registration
-    └── commands.rs           All backend logic:
-                              - Peekaboo wrappers (capture, hotkeys, click)
-                              - GPT-4o Vision API (analyze_page)
-                              - GPT-5.4 Computer Use loop (computer_use_task)
-                              - Ephemeral key minting for Realtime API
-                              - Apple Books activation and window management
+    ├── commands.rs           All backend logic:
+    │                         - Peekaboo wrappers (capture, hotkeys, click)
+    │                         - GPT-4o Vision API (analyze_page)
+    │                         - GPT-5.4 Computer Use loop (computer_use_task)
+    │                         - Ephemeral key minting for Realtime API
+    │                         - Apple Books activation and window management
+    └── wake_word.rs          Whisper API transcription for wake word detection
 ```
 
 ### Tool Architecture
@@ -171,15 +182,13 @@ src-tauri/                    Rust backend (Tauri v2)
 ## Planned Features
 
 - **Animated character**: Rive-based Samuel avatar with facial expressions mapped to agent states (idle, listening, thinking, speaking)
-- **Wake word**: "Hey Samuel" activation via local wake word detection (Picovoice Porcupine), eliminating echo issues entirely
-- **Sound cues**: Subtle chime on activation, thinking hum during processing
-- **Auto-connect**: Connect to voice agent automatically on app launch
+- **Local wake word model**: Replace Whisper API with on-device wake word detection (e.g. DaVoice ONNX) for instant, offline, zero-cost activation
 
 ## Limitations
 
 - **macOS only** — relies on Apple Books and Peekaboo
 - **DRM** — protected books may produce black screenshots
-- **API costs** — each page read makes a Vision API call; chapter reads make one per page; CUA navigation makes multiple calls per task
+- **API costs** — each page read makes a Vision API call; chapter reads make one per page; CUA navigation makes multiple calls per task; wake word uses Whisper API (~$0.006/min while listening)
 - **GPT-5.4 access** — Computer Use requires API access to GPT-5.4 (launched March 2026)
 
 ## License

@@ -20,6 +20,7 @@ export interface UseRealtimeReturn {
   disconnect: () => void;
   mute: (muted: boolean) => void;
   isMuted: boolean;
+  setWakeWordMode: (on: boolean) => void;
 }
 
 let entryCounter = 0;
@@ -49,6 +50,31 @@ export function useRealtime(): UseRealtimeReturn {
 
   // Track whether the user manually muted so we don't override their choice
   const userMutedRef = useRef(false);
+
+  // Wake word mode: after Samuel speaks, don't auto-unmute. Instead start an
+  // inactivity timer. If user speaks within the window, keep going. If not,
+  // mute mic and set agentState to "idle" (signals wake word should re-enable).
+  const wakeWordModeRef = useRef(false);
+  const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearInactivityTimer = () => {
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+      inactivityTimerRef.current = null;
+    }
+  };
+
+  const startInactivityTimer = () => {
+    clearInactivityTimer();
+    inactivityTimerRef.current = setTimeout(() => {
+      // No user speech detected — go back to wake word mode
+      if (wakeWordModeRef.current && sessionRef.current) {
+        try { sessionRef.current.mute(true); } catch {}
+        setIsMuted(true);
+        setAgentState("idle");
+      }
+    }, 6000);
+  };
 
   useEffect(() => {
     const session = new RealtimeSession(samuelAgent, {
@@ -94,6 +120,11 @@ export function useRealtime(): UseRealtimeReturn {
           if (!userMutedRef.current && sessionRef.current) {
             try { sessionRef.current.mute(false); } catch {}
           }
+          // In wake word mode, start inactivity timer — if user doesn't speak
+          // within 6 seconds, we mute and go back to wake word listening.
+          if (wakeWordModeRef.current) {
+            startInactivityTimer();
+          }
         }, 500);
       }
     });
@@ -116,6 +147,8 @@ export function useRealtime(): UseRealtimeReturn {
       switch (type) {
         case "input_audio_buffer.speech_started": {
           setAgentState("listening");
+          // User is speaking — cancel any inactivity timer (keep conversation alive)
+          clearInactivityTimer();
           // Insert a placeholder now so the user bubble appears before the agent reply
           const placeholder = makeEntry("user", "...");
           userPendingIdRef.current = placeholder.id;
@@ -266,6 +299,11 @@ export function useRealtime(): UseRealtimeReturn {
     setIsMuted(muted);
   }, []);
 
+  const setWakeWordMode = useCallback((on: boolean) => {
+    wakeWordModeRef.current = on;
+    if (!on) clearInactivityTimer();
+  }, []);
+
   return {
     status,
     transcript,
@@ -274,5 +312,6 @@ export function useRealtime(): UseRealtimeReturn {
     disconnect,
     mute,
     isMuted,
+    setWakeWordMode,
   };
 }

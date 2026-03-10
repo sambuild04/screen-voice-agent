@@ -18,10 +18,14 @@ export function Transcript({ entries, agentState }: TranscriptProps) {
   if (entries.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center px-6">
-        <p className="text-center text-slate-500 text-sm">
-          Press <span className="font-semibold text-slate-400">Connect</span> to
-          start a conversation with Samuel.
-        </p>
+        <div className="text-center">
+          <p className="text-slate-400 text-base font-medium mb-1">
+            Say &quot;Hey Samuel&quot;
+          </p>
+          <p className="text-slate-600 text-xs">
+            to start a conversation with Samuel
+          </p>
+        </div>
       </div>
     );
   }

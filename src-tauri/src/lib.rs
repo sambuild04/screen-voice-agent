@@ -1,6 +1,8 @@
 mod commands;
+mod wake_word;
 
 use commands::*;
+use wake_word::*;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +29,7 @@ pub fn run() {
             search_book,
             computer_use_task,
             get_config,
+            transcribe_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

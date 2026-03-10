@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Samuel needs microphone access for voice conversations and wake word detection.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Samuel uses speech recognition to detect the "Hey Samuel" wake word.</string>
+</dict>
+</plist>

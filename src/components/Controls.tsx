@@ -3,7 +3,7 @@ import type { ConnectionStatus } from "../hooks/useRealtime";
 interface ControlsProps {
   status: ConnectionStatus;
   isMuted: boolean;
-  onConnect: () => void;
+  awaitingWake?: boolean;
   onDisconnect: () => void;
   onMute: (muted: boolean) => void;
 }
@@ -11,65 +11,75 @@ interface ControlsProps {
 export function Controls({
   status,
   isMuted,
-  onConnect,
+  awaitingWake,
   onDisconnect,
   onMute,
 }: ControlsProps) {
   const isConnected = status === "connected";
   const isConnecting = status === "connecting";
 
+  // Not connected — show wake word prompt
+  if (!isConnected && !isConnecting) {
+    return (
+      <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-slate-700/50">
+        <div className="flex items-center gap-2 rounded-full bg-violet-900/30 px-5 py-3 text-sm font-medium text-violet-300">
+          <WaveIcon />
+          Say &quot;Hey Samuel&quot; to start
+        </div>
+      </div>
+    );
+  }
+
+  // Connecting
+  if (isConnecting) {
+    return (
+      <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-slate-700/50">
+        <div className="flex items-center gap-2 rounded-full bg-surface-elevated px-5 py-3 text-sm font-medium text-slate-300">
+          <SpinnerIcon />
+          Connecting...
+        </div>
+      </div>
+    );
+  }
+
+  // Connected
   return (
     <div className="flex items-center justify-center gap-3 px-4 py-4 border-t border-slate-700/50">
-      {isConnected ? (
-        <>
-          <button
-            onClick={() => onMute(!isMuted)}
-            className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-colors ${
-              isMuted
-                ? "bg-red-900/40 text-red-300 hover:bg-red-900/60"
-                : "bg-surface-elevated text-slate-300 hover:bg-surface-hover"
-            }`}
-          >
-            {isMuted ? (
-              <>
-                <MicOffIcon />
-                Muted
-              </>
-            ) : (
-              <>
-                <MicIcon />
-                Mic On
-              </>
-            )}
-          </button>
-
-          <button
-            onClick={onDisconnect}
-            className="flex items-center gap-2 rounded-full bg-red-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-red-700 transition-colors"
-          >
-            <PhoneOffIcon />
-            End
-          </button>
-        </>
+      {awaitingWake ? (
+        <div className="flex items-center gap-2 rounded-full bg-violet-900/30 px-4 py-2.5 text-sm font-medium text-violet-300">
+          <WaveIcon />
+          Say &quot;Hey Samuel&quot;
+        </div>
       ) : (
         <button
-          onClick={onConnect}
-          disabled={isConnecting}
-          className="flex items-center gap-2 rounded-full bg-cyan-600 px-6 py-3 text-sm font-semibold text-white hover:bg-cyan-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          onClick={() => onMute(!isMuted)}
+          className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium transition-colors ${
+            isMuted
+              ? "bg-red-900/40 text-red-300 hover:bg-red-900/60"
+              : "bg-surface-elevated text-slate-300 hover:bg-surface-hover"
+          }`}
         >
-          {isConnecting ? (
+          {isMuted ? (
             <>
-              <SpinnerIcon />
-              Connecting...
+              <MicOffIcon />
+              Muted
             </>
           ) : (
             <>
-              <PhoneIcon />
-              Connect
+              <MicIcon />
+              Mic On
             </>
           )}
         </button>
       )}
+
+      <button
+        onClick={onDisconnect}
+        className="flex items-center gap-2 rounded-full bg-red-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+      >
+        <PhoneOffIcon />
+        End
+      </button>
     </div>
   );
 }
@@ -97,20 +107,20 @@ function MicOffIcon() {
   );
 }
 
-function PhoneIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92Z" />
-    </svg>
-  );
-}
-
 function PhoneOffIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67" />
       <path d="M2.68 2.68A19.79 19.79 0 0 0 2.11 4.18 2 2 0 0 0 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91" />
       <line x1="2" x2="22" y1="2" y2="22" />
+    </svg>
+  );
+}
+
+function WaveIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 12h2M6 8v8M10 4v16M14 8v8M18 6v12M22 12h-2" />
     </svg>
   );
 }

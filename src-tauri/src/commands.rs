@@ -727,7 +727,7 @@ pub async fn get_config() -> Result<Config, String> {
     read_config_internal()
 }
 
-fn read_config_internal() -> Result<Config, String> {
+pub fn read_config_internal() -> Result<Config, String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     let path = home.join(".books-reader.json");
 
