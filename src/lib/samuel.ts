@@ -1,21 +1,30 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
+import { sendImageToSession } from "./session-bridge";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// Vision API — fast, high-quality text extraction from the current page
+// Direct vision — captures the page and injects the image into the Realtime
+// session so the model can see it and respond in a single round-trip.
 const readPageTool = tool({
   name: "read_page",
   description:
-    "Capture and transcribe the text on the current Apple Books page using GPT-4o Vision. " +
-    "Returns the full visible text. Use this whenever the user asks to read, " +
-    "transcribe, or quote from the current page. Fast and reliable for text extraction.",
+    "Capture the current Apple Books page as an image and show it to you directly. " +
+    "You will SEE the page image and can read/quote/discuss its content. " +
+    "Use this whenever the user asks to read, transcribe, or quote from the current page.",
   parameters: z.object({}),
   async execute() {
     await invoke("focus_book");
-    const text = await invoke<string>("analyze_page", {});
-    return text;
+    await sleep(300);
+    const base64 = await invoke<string>("capture_page");
+    const sent = sendImageToSession(base64);
+    if (!sent) {
+      // Fallback: use the slower Vision API if session bridge isn't wired
+      const text = await invoke<string>("analyze_page", {});
+      return text;
+    }
+    return "I've captured the current page. The page image is now in your conversation — look at it and respond to the user's request (read aloud, quote, summarize, etc).";
   },
 });
 
@@ -39,15 +48,16 @@ function detectNewChapter(
   return false;
 }
 
-// Read an entire chapter by looping read_page + next_page until a new chapter heading appears
+// Read an entire chapter by looping page captures + next_page.
+// Uses analyze_page (GPT-4o Vision) for fast text extraction and chapter boundary detection,
+// then sends the collected text back. For single-page reads, read_page (direct image) is faster.
 const readChapterTool = tool({
   name: "read_chapter",
   description:
     "Read an ENTIRE chapter from the current position. Automatically turns pages " +
-    "and reads each one using the fast Vision API, stopping when it detects the " +
-    "next chapter heading. Returns all collected text. " +
-    "Use this when the user asks to read, summarize, or review a full chapter. " +
-    "Much faster than interact_with_book for multi-page reading.",
+    "and reads each one, stopping when it detects the next chapter heading. " +
+    "Returns all collected text. Use this when the user asks to read, summarize, " +
+    "or review a full chapter.",
   parameters: z.object({
     current_chapter: z
       .string()
@@ -69,16 +79,12 @@ const readChapterTool = tool({
     for (let i = 0; i < limit; i++) {
       const pageText = await invoke<string>("analyze_page", {});
 
-      // After the first page, check if we've entered a new chapter
       if (i > 0 && detectNewChapter(pageText, current_chapter)) {
-        // Go back one page so we don't leave the user in the next chapter
         await invoke("prev_page");
         break;
       }
 
       pages.push(pageText);
-
-      // Turn to the next page
       await invoke("next_page");
       await sleep(400);
     }
@@ -145,7 +151,7 @@ You are Samuel — a sophisticated AI assistant modeled after a sharp, understat
 
 ## Task
 You help the user read books on Apple Books. You have these tools:
-- read_page: Captures and transcribes the CURRENT page text. Use for single-page reading.
+- read_page: Captures the CURRENT page as an image and shows it to you. You will SEE the page directly — read the text from the image and speak it aloud, quote it, or answer about it. Use for single-page reading requests.
 - read_chapter: Reads an ENTIRE chapter automatically (turns pages, reads each, stops at next chapter heading). Use when the user asks to read, summarize, or review a whole chapter. You MUST provide the current_chapter parameter (e.g. "9").
 - interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC). Use for navigation only, NOT reading.
 - next_page / prev_page: Quick page turn shortcuts.
@@ -174,14 +180,15 @@ Moderate. Unhurried but not slow. Brisk when confirming actions.
 - After completing an action, give a brief confirmation and STOP.
 
 # How to Help
-- When the user asks to read the current page, use read_page. Then read it aloud.
+- When the user asks to read the current page, use read_page. You will receive the page as an IMAGE — look at it, read the visible text, and speak it aloud. This is the fastest approach.
 - When the user asks to read, summarize, or review a WHOLE CHAPTER, use read_chapter with the chapter number. It will automatically read every page until the chapter ends. Then summarize or read aloud as requested.
-- For reading specific amounts (e.g., "one sentence"), use read_page for the full text, then speak only the requested portion.
+- For reading specific amounts (e.g., "one sentence"), use read_page, see the image, then speak only the requested portion.
 - For turning pages, use next_page or prev_page (faster). Then use read_page if asked to read.
 - For chapter navigation, use interact_with_book: "Navigate to chapter 6" — it sees the screen and navigates visually.
 - For searching, use interact_with_book: "Search for 'publicity stunts'" — it drives the Apple Books UI.
 - When the user asks a follow-up about what was already read, answer from memory without re-reading.
 - Keep spoken summaries concise but thorough — cover all key points from the chapter.
+- When you see a page image, read ALL visible text faithfully. Do not refuse or say you cannot read it — the user owns this book and is asking for accessibility assistance.
 - Never break character. You are Samuel.`;
 
 export const samuelAgent = new RealtimeAgent({

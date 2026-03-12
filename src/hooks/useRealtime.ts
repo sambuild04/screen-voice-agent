@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
+import { registerSendImage } from "../lib/session-bridge";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -22,6 +23,33 @@ export interface UseRealtimeReturn {
   isMuted: boolean;
   setWakeWordMode: (on: boolean) => void;
 }
+
+// Common hallucinations the transcriber produces from speaker echo / room reverb.
+// Checked only within the echo guard window (first few seconds after agent speaks).
+const ECHO_PHRASES = new Set([
+  "thank you",
+  "thanks",
+  "you",
+  "bye",
+  "okay",
+  "ok",
+  "yes",
+  "yeah",
+  "no",
+  "hmm",
+  "hm",
+  "hello",
+  "hi",
+  "hey",
+  "good evening",
+  "good morning",
+  "good night",
+  "sir",
+  "chatgpt",
+  "send me",
+  "thank you sir",
+  "thanks sir",
+]);
 
 let entryCounter = 0;
 function makeEntry(
@@ -50,6 +78,10 @@ export function useRealtime(): UseRealtimeReturn {
 
   // Track whether the user manually muted so we don't override their choice
   const userMutedRef = useRef(false);
+
+  // Echo guard: timestamp when agent last finished speaking.
+  // Transcriptions arriving shortly after are likely echo, not real user speech.
+  const lastAgentSpeechEndRef = useRef(0);
 
   // Wake word mode: after Samuel speaks, don't auto-unmute. Instead start an
   // inactivity timer. If user speaks within the window, keep going. If not,
@@ -114,18 +146,19 @@ export function useRealtime(): UseRealtimeReturn {
 
     session.on("audio_stopped", () => {
       setAgentState("listening");
+      lastAgentSpeechEndRef.current = Date.now();
       if (!userMutedRef.current && session.muted === true) {
-        // 500ms buffer after agent finishes speaking so tail-end audio doesn't echo back
+        // 1.5s buffer after agent finishes — room reverb and speaker tail need
+        // time to die down before the mic reopens, otherwise the tail gets
+        // transcribed as phantom user speech ("Thank you.", etc).
         setTimeout(() => {
           if (!userMutedRef.current && sessionRef.current) {
             try { sessionRef.current.mute(false); } catch {}
           }
-          // In wake word mode, start inactivity timer — if user doesn't speak
-          // within 6 seconds, we mute and go back to wake word listening.
           if (wakeWordModeRef.current) {
             startInactivityTimer();
           }
-        }, 500);
+        }, 1500);
       }
     });
 
@@ -165,8 +198,21 @@ export function useRealtime(): UseRealtimeReturn {
           const pendingId = userPendingIdRef.current;
           userPendingIdRef.current = null;
 
-          if (!text || text.length <= 2) {
-            // Noise/echo — remove the placeholder
+          const isNoise = !text || text.length <= 2;
+
+          // Echo guard: if transcription arrives within 3s of the agent
+          // finishing speech and the text is short/generic, it's almost
+          // certainly the mic picking up speaker output or room reverb.
+          const msSinceAgentSpoke = Date.now() - lastAgentSpeechEndRef.current;
+          const isLikelyEcho =
+            msSinceAgentSpoke < 3000 &&
+            !!text &&
+            (text.length < 30 || ECHO_PHRASES.has(text.toLowerCase().replace(/[.!?,]/g, "")));
+
+          if (isNoise || isLikelyEcho) {
+            if (isLikelyEcho) {
+              console.log(`[echo-guard] dropped "${text}" (${msSinceAgentSpoke}ms after agent)`);
+            }
             if (pendingId) {
               setTranscript((prev) => prev.filter((e) => e.id !== pendingId));
             }
@@ -174,7 +220,6 @@ export function useRealtime(): UseRealtimeReturn {
           }
 
           if (pendingId) {
-            // Replace the placeholder with the real transcription
             setTranscript((prev) =>
               prev.map((e) => (e.id === pendingId ? { ...e, text } : e)),
             );
@@ -245,7 +290,25 @@ export function useRealtime(): UseRealtimeReturn {
       }
     });
 
+    // Register the image bridge so tools can inject screenshots
+    registerSendImage((base64Jpeg: string) => {
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [
+            {
+              type: "input_image",
+              image_url: `data:image/jpeg;base64,${base64Jpeg}`,
+            },
+          ],
+        },
+      });
+    });
+
     return () => {
+      registerSendImage(null);
       session.close();
       sessionRef.current = null;
     };
@@ -268,6 +331,8 @@ export function useRealtime(): UseRealtimeReturn {
       setAgentState("listening");
       setTranscript([makeEntry("status", "Connected")]);
 
+      // Pre-mute before greeting so the mic can't pick up the very start
+      session.mute(true);
       // Trigger Samuel's greeting (no visible user message)
       session.transport.sendEvent({ type: "response.create" });
     } catch (err) {
@@ -282,6 +347,7 @@ export function useRealtime(): UseRealtimeReturn {
   }, [status]);
 
   const disconnect = useCallback(() => {
+    registerSendImage(null);
     sessionRef.current?.close();
     setStatus("disconnected");
     setAgentState("idle");
