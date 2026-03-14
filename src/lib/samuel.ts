@@ -1,7 +1,12 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget } from "./session-bridge";
+
+interface CaptureResult {
+  base64: string;
+  app_name: string;
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -16,8 +21,9 @@ const readPageTool = tool({
   async execute() {
     await invoke("focus_book");
     await sleep(300);
-    const base64 = await invoke<string>("capture_page");
-    sendImageToSession(base64);
+    const result = await invoke<CaptureResult>("capture_page");
+    sendImageToSession(result.base64);
+    notifyScreenTarget(result.app_name);
     return "I've captured the current Apple Books page. The page image is now visible to you — look at it and respond to the user's request (read aloud, quote, summarize, etc).";
   },
 });
@@ -146,25 +152,32 @@ const prevPageTool = tool({
 const viewScreenTool = tool({
   name: "view_screen",
   description:
-    "Capture the currently focused window on the user's screen (browser, Apple Books, any app) " +
-    "and show it to you as an image. Use this when the user asks you to look at their " +
-    "screen, translate something they're viewing, explain text on screen, or help with " +
-    "language learning from any content on their display.",
-  parameters: z.object({}),
-  async execute() {
+    "Capture a window or display on the user's screen and show it to you as an image. " +
+    "Use this when the user asks you to look at their screen, translate something they're viewing, " +
+    "explain text on screen, or help with language learning from any content on their display. " +
+    "If the user mentions a specific app (e.g. 'look at my Chrome'), pass app_name.",
+  parameters: z.object({
+    app_name: z.string().optional().describe(
+      "Name of the app to capture, e.g. 'Chrome', 'Safari', 'Firefox'. " +
+      "Extract from user speech like 'look at my Chrome'. Omit to use the default display.",
+    ),
+  }),
+  async execute({ app_name }) {
     await sleep(200);
-    const base64 = await invoke<string>("capture_active_window");
-    sendImageToSession(base64);
-    return "I've captured the user's active window. The screenshot is now visible to you — look at it and respond to the user's request.";
+    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
+    sendImageToSession(result.base64);
+    notifyScreenTarget(result.app_name);
+    return `I've captured the user's screen (${result.app_name}). The screenshot is now visible to you — look at it and respond to the user's request.`;
   },
 });
 
 const translateScreenTool = tool({
   name: "translate_screen",
   description:
-    "Capture the user's active window and translate visible foreign-language text. " +
+    "Capture the user's screen and translate visible foreign-language text. " +
     "Use this when the user asks to translate what they see on screen, " +
-    "e.g. 'translate this', 'what does this say', 'translate the page'.",
+    "e.g. 'translate this', 'what does this say', 'translate the page'. " +
+    "If the user mentions a specific app, pass app_name.",
   parameters: z.object({
     target_language: z
       .string()
@@ -173,22 +186,27 @@ const translateScreenTool = tool({
         "Language to translate INTO (default: English). " +
           "Examples: 'English', 'Japanese', 'Chinese', 'Spanish'.",
       ),
+    app_name: z.string().optional().describe(
+      "Name of the app to capture, e.g. 'Chrome', 'Safari'. Omit to use the default display.",
+    ),
   }),
-  async execute({ target_language }) {
+  async execute({ target_language, app_name }) {
     await sleep(200);
-    const base64 = await invoke<string>("capture_active_window");
-    sendImageToSession(base64);
+    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
+    sendImageToSession(result.base64);
+    notifyScreenTarget(result.app_name);
     const lang = target_language || "English";
-    return `I've captured the active window. Look at the image, find all foreign-language text visible, and translate it into ${lang}. Provide the original text, its reading/pronunciation, and the translation. Be thorough.`;
+    return `I've captured the screen (${result.app_name}). Look at the image, find all foreign-language text visible, and translate it into ${lang}. Provide the original text, its reading/pronunciation, and the translation. Be thorough.`;
   },
 });
 
 const explainGrammarTool = tool({
   name: "explain_grammar",
   description:
-    "Capture the active window and explain the grammar of visible foreign-language text. " +
+    "Capture the screen and explain the grammar of visible foreign-language text. " +
     "Use when the user asks about grammar, sentence structure, particles, conjugation, " +
-    "or how a phrase works in the language they're studying.",
+    "or how a phrase works in the language they're studying. " +
+    "If the user mentions a specific app, pass app_name.",
   parameters: z.object({
     focus: z
       .string()
@@ -197,15 +215,19 @@ const explainGrammarTool = tool({
         "Optional: specific word, phrase, or sentence to focus on. " +
           "If omitted, explain the most prominent foreign text on screen.",
       ),
+    app_name: z.string().optional().describe(
+      "Name of the app to capture, e.g. 'Chrome', 'Safari'. Omit to use the default display.",
+    ),
   }),
-  async execute({ focus }) {
+  async execute({ focus, app_name }) {
     await sleep(200);
-    const base64 = await invoke<string>("capture_active_window");
-    sendImageToSession(base64);
+    const result = await invoke<CaptureResult>("capture_active_window", { appName: app_name ?? null });
+    sendImageToSession(result.base64);
+    notifyScreenTarget(result.app_name);
     const focusNote = focus
       ? `Focus specifically on: "${focus}".`
       : "Focus on the most prominent foreign-language text visible.";
-    return `I've captured the active window. Look at the image and explain the grammar of the foreign-language text. ${focusNote} Break down: sentence structure, particles/markers, verb conjugations, and any grammar points. Give examples of similar patterns.`;
+    return `I've captured the screen (${result.app_name}). Look at the image and explain the grammar of the foreign-language text. ${focusNote} Break down: sentence structure, particles/markers, verb conjugations, and any grammar points. Give examples of similar patterns.`;
   },
 });
 
@@ -253,6 +275,9 @@ You are a reading and language learning assistant. You have two sets of tools:
 - translate_screen: Captures screen and you translate all visible foreign text. Use when user says "translate this", "what does this say", etc.
 - explain_grammar: Captures screen and you break down the grammar of visible foreign text. Use when user asks about grammar, particles, conjugation, sentence structure.
 - pronounce: You speak a word/phrase in the correct language with proper pronunciation. Use when user says "how do you say...", "pronounce...", "say this word".
+
+### Multi-monitor awareness
+The user has multiple monitors. If they mention a specific app ("look at my Chrome", "translate what's in Safari", "check my browser"), ALWAYS pass that app's name as the app_name parameter to view_screen / translate_screen / explain_grammar. This ensures we capture the right window, even if it is on a different display. If they just say "look at my screen" without specifying an app, leave app_name empty — it will use their chosen default display.
 
 ## Demeanor
 Loyal, efficient, occasionally sardonic — but never rude. Warm but measured.

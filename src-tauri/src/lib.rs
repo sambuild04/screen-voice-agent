@@ -3,6 +3,7 @@ mod wake_word;
 
 use commands::*;
 use wake_word::*;
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -16,6 +17,24 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            #[cfg(target_os = "macos")]
+            {
+                use cocoa::appkit::{NSColor, NSWindow};
+                use cocoa::base::nil;
+
+                let win = app
+                    .get_webview_window("main")
+                    .expect("main window not found");
+                let ns_win = win.ns_window().unwrap() as cocoa::base::id;
+                unsafe {
+                    let clear = NSColor::clearColor(nil);
+                    ns_win.setBackgroundColor_(clear);
+                    ns_win.setOpaque_(cocoa::base::NO);
+                    ns_win.setHasShadow_(cocoa::base::NO);
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -32,6 +51,8 @@ pub fn run() {
             computer_use_task,
             get_config,
             transcribe_audio,
+            list_displays,
+            set_default_display,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

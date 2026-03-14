@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage } from "../lib/session-bridge";
+import { registerSendImage, registerScreenTarget } from "../lib/session-bridge";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -17,6 +17,7 @@ export interface UseRealtimeReturn {
   status: ConnectionStatus;
   transcript: TranscriptEntry[];
   agentState: "idle" | "listening" | "thinking" | "speaking";
+  screenTarget: string | null;
   connect: () => Promise<void>;
   disconnect: () => void;
   mute: (muted: boolean) => void;
@@ -44,11 +45,25 @@ const ECHO_PHRASES = new Set([
   "good evening",
   "good morning",
   "good night",
+  "good day",
+  "good day sir",
+  "good evening sir",
+  "good morning sir",
   "sir",
   "chatgpt",
   "send me",
   "thank you sir",
   "thanks sir",
+  "at your service",
+  "how may i",
+  "how may i assist",
+  "how may i assist you",
+  "how may i be of assistance",
+  "how can i help",
+  "how can i assist",
+  "samuel",
+  "samly",
+  "kit",
 ]);
 
 let entryCounter = 0;
@@ -66,6 +81,8 @@ export function useRealtime(): UseRealtimeReturn {
     "idle" | "listening" | "thinking" | "speaking"
   >("idle");
   const [isMuted, setIsMuted] = useState(false);
+  const [screenTarget, setScreenTarget] = useState<string | null>(null);
+  const screenTargetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
 
@@ -102,14 +119,16 @@ export function useRealtime(): UseRealtimeReturn {
 
   const startInactivityTimer = () => {
     clearInactivityTimer();
+    // Longer timeout after the greeting — give the user time to listen and respond
+    const isFirstExchange = agentResponseCountRef.current <= 1;
+    const timeout = isFirstExchange ? 15_000 : 6_000;
     inactivityTimerRef.current = setTimeout(() => {
-      // No user speech detected — go back to wake word mode
       if (wakeWordModeRef.current && sessionRef.current) {
         try { sessionRef.current.mute(true); } catch {}
         setIsMuted(true);
         setAgentState("idle");
       }
-    }, 6000);
+    }, timeout);
   };
 
   useEffect(() => {
@@ -152,9 +171,10 @@ export function useRealtime(): UseRealtimeReturn {
       setAgentState("listening");
       lastAgentSpeechEndRef.current = Date.now();
       if (!userMutedRef.current && session.muted === true) {
-        // 1.5s buffer after agent finishes — room reverb and speaker tail need
-        // time to die down before the mic reopens, otherwise the tail gets
-        // transcribed as phantom user speech ("Thank you.", etc).
+        // Longer buffer after the greeting (first response) — WebRTC echo
+        // cancellation has no reference data yet, so reverb lingers longer.
+        const isGreeting = agentResponseCountRef.current === 0;
+        const unmuteDelay = isGreeting ? 3000 : 1500;
         setTimeout(() => {
           if (!userMutedRef.current && sessionRef.current) {
             try { sessionRef.current.mute(false); } catch {}
@@ -162,7 +182,7 @@ export function useRealtime(): UseRealtimeReturn {
           if (wakeWordModeRef.current) {
             startInactivityTimer();
           }
-        }, 1500);
+        }, unmuteDelay);
       }
     });
 
@@ -210,14 +230,21 @@ export function useRealtime(): UseRealtimeReturn {
 
           // Echo guard: transcriptions arriving shortly after agent speech are
           // likely the mic picking up speaker output / room reverb.
-          // Use a longer window after the greeting (first response) because
-          // WebRTC echo cancellation has no reference data yet at that point.
+          // Greeting window is extra wide (8s) because WebRTC echo cancellation
+          // has no reference data yet. During that window, also drop anything
+          // under 50 chars — greeting echoes are always short fragments.
           const msSinceAgentSpoke = Date.now() - lastAgentSpeechEndRef.current;
-          const echoWindow = agentResponseCountRef.current <= 1 ? 6000 : 3000;
+          const isGreetingWindow = agentResponseCountRef.current <= 1;
+          const echoWindow = isGreetingWindow ? 8000 : 3000;
+          const normalized = text ? text.toLowerCase().replace(/[.!?,'"]/g, "").trim() : "";
           const isLikelyEcho =
             msSinceAgentSpoke < echoWindow &&
             !!text &&
-            (text.length < 30 || ECHO_PHRASES.has(text.toLowerCase().replace(/[.!?,]/g, "")));
+            (
+              (isGreetingWindow && text.length < 50) ||
+              text.length < 30 ||
+              ECHO_PHRASES.has(normalized)
+            );
 
           if (isNoise || isLikelyEcho) {
             if (isLikelyEcho) {
@@ -301,6 +328,13 @@ export function useRealtime(): UseRealtimeReturn {
       }
     });
 
+    // Register screen target callback — shows a brief toast of which app was captured
+    registerScreenTarget((appName: string) => {
+      setScreenTarget(appName);
+      if (screenTargetTimerRef.current) clearTimeout(screenTargetTimerRef.current);
+      screenTargetTimerRef.current = setTimeout(() => setScreenTarget(null), 3000);
+    });
+
     // Register the image bridge so tools can inject screenshots
     registerSendImage((base64Jpeg: string) => {
       session.transport.sendEvent({
@@ -320,6 +354,7 @@ export function useRealtime(): UseRealtimeReturn {
 
     return () => {
       registerSendImage(null);
+      registerScreenTarget(null);
       session.close();
       sessionRef.current = null;
     };
@@ -360,6 +395,7 @@ export function useRealtime(): UseRealtimeReturn {
 
   const disconnect = useCallback(() => {
     registerSendImage(null);
+    registerScreenTarget(null);
     sessionRef.current?.close();
     setStatus("disconnected");
     setAgentState("idle");
@@ -386,6 +422,7 @@ export function useRealtime(): UseRealtimeReturn {
     status,
     transcript,
     agentState,
+    screenTarget,
     connect,
     disconnect,
     mute,

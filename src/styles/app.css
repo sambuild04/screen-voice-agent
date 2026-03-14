@@ -11,24 +11,162 @@
 html, body, #root {
   height: 100%;
   margin: 0;
-  background: var(--color-surface);
+  background: transparent;
   color: #e2e8f0;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Pulse animation for the speaking indicator */
-@keyframes pulse-ring {
-  0% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(1.15); opacity: 0.3; }
-  100% { transform: scale(1); opacity: 0.6; }
+/* ── Character Stage ─────────────────────────────────────── */
+.character-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  position: relative;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.5rem 1rem 1rem;
+  gap: 0.5rem;
 }
 
-.pulse-ring {
-  animation: pulse-ring 1.5s ease-in-out infinite;
+/* Rive canvas container */
+.character-avatar {
+  width: 180px;
+  height: 180px;
+  border-radius: 50%;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
 }
 
-/* Thinking dots — gentle bounce */
+.character-avatar > div {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* ── Manga Speech Bubbles ────────────────────────────────── */
+.speech-bubble {
+  position: relative;
+  max-width: 90%;
+  max-height: 30vh;
+  overflow-y: auto;
+  padding: 10px 14px;
+  border-radius: 16px;
+  font-size: 12px;
+  line-height: 1.45;
+  animation: bubble-in 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+  z-index: 2;
+  flex-shrink: 1;
+}
+
+.speech-bubble p {
+  margin: 0;
+}
+
+/* Samuel's bubble — above the character */
+.speech-bubble-samuel {
+  background: rgba(30, 41, 59, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #e2e8f0;
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  align-self: center;
+}
+
+/* User's bubble — below the character */
+.speech-bubble-user {
+  background: rgba(6, 182, 212, 0.15);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  color: #a5f3fc;
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  align-self: center;
+}
+
+/* Speech tail — triangular pointer connecting bubble to character */
+.speech-tail {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.speech-tail-left {
+  bottom: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-top: 8px solid rgba(30, 41, 59, 0.85);
+}
+
+.speech-tail-right {
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 8px solid transparent;
+  border-right: 8px solid transparent;
+  border-bottom: 8px solid rgba(6, 182, 212, 0.15);
+}
+
+@keyframes bubble-in {
+  0% { opacity: 0; transform: scale(0.85) translateY(6px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* ── Screen Target Badge ─────────────────────────────────── */
+.screen-target-badge {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #a5f3fc;
+  background: rgba(6, 182, 212, 0.15);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(6, 182, 212, 0.2);
+  animation: badge-in 0.3s ease-out;
+}
+
+@keyframes badge-in {
+  0% { opacity: 0; transform: translateY(-4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+/* ── State Indicators ────────────────────────────────────── */
+.character-hint {
+  color: #e2e8f0;
+  font-size: 13px;
+  font-weight: 500;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  animation: gentle-pulse 2.5s ease-in-out infinite;
+}
+
+.character-listening {
+  margin-top: 0.25rem;
+}
+
+@keyframes gentle-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+/* ── Character Glow (speaking) ───────────────────────────── */
+@keyframes character-glow {
+  0%, 100% { box-shadow: 0 0 20px rgba(6, 182, 212, 0.15); }
+  50% { box-shadow: 0 0 50px rgba(6, 182, 212, 0.35); }
+}
+
+.character-glow {
+  animation: character-glow 2s ease-in-out infinite;
+}
+
+/* ── Thinking Dots ───────────────────────────────────────── */
 @keyframes thinking-bounce {
   0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
   30% { transform: translateY(-6px); opacity: 1; }
@@ -42,7 +180,7 @@ html, body, #root {
   animation: thinking-bounce 1.2s ease-in-out infinite;
 }
 
-/* Waveform bars — listening indicator */
+/* ── Waveform Bars (listening) ───────────────────────────── */
 @keyframes waveform {
   0%, 100% { height: 4px; opacity: 0.3; }
   50% { height: 16px; opacity: 0.8; }
@@ -56,7 +194,13 @@ html, body, #root {
   animation: waveform 1s ease-in-out infinite;
 }
 
-/* Scroll anchor for transcript */
-.transcript-scroll {
-  scroll-behavior: smooth;
+/* ── Pulse ring (status bar) ─────────────────────────────── */
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.15); opacity: 0.3; }
+  100% { transform: scale(1); opacity: 0.6; }
+}
+
+.pulse-ring {
+  animation: pulse-ring 1.5s ease-in-out infinite;
 }

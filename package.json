@@ -22,6 +22,7 @@
   "dependencies": {
     "@clack/prompts": "^1.0.1",
     "@openai/agents": "^0.5.4",
+    "@rive-app/react-canvas": "^4.27.1",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "commander": "^12.1.0",

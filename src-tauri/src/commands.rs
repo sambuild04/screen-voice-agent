@@ -2,11 +2,26 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static DEFAULT_DISPLAY: AtomicU32 = AtomicU32::new(1);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BookWindow {
     pub title: String,
     pub window_id: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CaptureResult {
+    pub base64: String,
+    pub app_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DisplayInfo {
+    pub index: u32,
+    pub name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,10 +113,11 @@ pub async fn create_ephemeral_key() -> Result<String, String> {
         .ok_or_else(|| format!("No 'value' in ephemeral key response: {response_str}"))
 }
 
-/// Capture the current Apple Books page and return base64 PNG.
+/// Capture the current Apple Books page and return base64 + app name.
 #[tauri::command]
-pub async fn capture_page() -> Result<String, String> {
-    capture_page_internal()
+pub async fn capture_page() -> Result<CaptureResult, String> {
+    let base64 = capture_page_internal()?;
+    Ok(CaptureResult { base64, app_name: "Books".to_string() })
 }
 
 /// Focus Apple Books and return window info.
@@ -362,43 +378,190 @@ pub async fn capture_screen() -> Result<String, String> {
     Ok(b64)
 }
 
-/// Capture the frontmost window (whichever app is focused) as a base64 JPEG.
-/// Handles multi-monitor correctly — targets the specific window, not the full screen.
+/// Capture a window or display. If `app_name` is provided, target that app;
+/// otherwise use the default display chosen via the UI picker.
 #[tauri::command]
-pub async fn capture_active_window() -> Result<String, String> {
-    capture_focused_window()
+pub async fn capture_active_window(app_name: Option<String>) -> Result<CaptureResult, String> {
+    capture_focused_window(app_name)
 }
 
-/// Internal helper — captures the frontmost window via peekaboo,
-/// falls back to main display if peekaboo can't target the app.
-fn capture_focused_window() -> Result<String, String> {
+/// Enumerate connected displays for the UI picker.
+#[tauri::command]
+pub async fn list_displays() -> Result<Vec<DisplayInfo>, String> {
+    // NSScreen descriptions via AppleScript — returns localized display names.
+    let script = r#"
+use framework "AppKit"
+set screens to current application's NSScreen's screens()
+set output to ""
+repeat with i from 1 to count of screens
+  set scr to item i of screens
+  set nm to (scr's localizedName()) as text
+  set output to output & i & "|" & nm & linefeed
+end repeat
+return output"#;
+    let out = Command::new("/usr/bin/osascript")
+        .args(["-l", "AppleScript", "-e", script])
+        .output()
+        .map_err(|e| format!("list_displays: {e}"))?;
+    let raw = String::from_utf8_lossy(&out.stdout);
+    let mut displays = Vec::new();
+    for line in raw.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        if let Some((idx_str, name)) = line.split_once('|') {
+            if let Ok(idx) = idx_str.trim().parse::<u32>() {
+                displays.push(DisplayInfo { index: idx, name: name.trim().to_string() });
+            }
+        }
+    }
+    if displays.is_empty() {
+        displays.push(DisplayInfo { index: 1, name: "Main Display".to_string() });
+    }
+    eprintln!("[displays] found: {:?}", displays);
+    Ok(displays)
+}
+
+/// Set which display to capture by default when no specific app is requested.
+#[tauri::command]
+pub async fn set_default_display(index: u32) -> Result<(), String> {
+    DEFAULT_DISPLAY.store(index, Ordering::Relaxed);
+    eprintln!("[displays] default set to {index}");
+    Ok(())
+}
+
+/// Determine which macOS display (1-indexed) holds the given app's main window.
+fn find_display_for_app(app: &str) -> Option<u32> {
+    // Get the window's top-left {x, y} position
+    let script = format!(
+        r#"tell application "System Events"
+  try
+    set appProc to application process "{}"
+    set winPos to position of window 1 of appProc
+    return ((item 1 of winPos) as text) & "," & ((item 2 of winPos) as text)
+  on error
+    return "none"
+  end try
+end tell"#,
+        app
+    );
+    let out = Command::new("/usr/bin/osascript")
+        .args(["-e", &script])
+        .output()
+        .ok()?;
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw == "none" || raw.is_empty() { return None; }
+    let parts: Vec<&str> = raw.split(',').collect();
+    if parts.len() != 2 { return None; }
+    let wx: f64 = parts[0].trim().parse().ok()?;
+    let wy: f64 = parts[1].trim().parse().ok()?;
+
+    // Get each screen's frame (origin + size) to determine which display
+    let screen_script = r#"
+use framework "AppKit"
+set screens to current application's NSScreen's screens()
+set output to ""
+repeat with i from 1 to count of screens
+  set scr to item i of screens
+  set f to scr's frame()
+  set ox to (f's origin's x) as real
+  set oy to (f's origin's y) as real
+  set sw to (f's |size|'s width) as real
+  set sh to (f's |size|'s height) as real
+  set output to output & i & "|" & ox & "|" & oy & "|" & sw & "|" & sh & linefeed
+end repeat
+return output"#;
+    let s_out = Command::new("/usr/bin/osascript")
+        .args(["-l", "AppleScript", "-e", screen_script])
+        .output()
+        .ok()?;
+    let s_raw = String::from_utf8_lossy(&s_out.stdout);
+    for line in s_raw.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+        let fields: Vec<&str> = line.split('|').collect();
+        if fields.len() != 5 { continue; }
+        let idx: u32 = fields[0].trim().parse().ok()?;
+        let ox: f64 = fields[1].trim().parse().ok()?;
+        let oy: f64 = fields[2].trim().parse().ok()?;
+        let sw: f64 = fields[3].trim().parse().ok()?;
+        let sh: f64 = fields[4].trim().parse().ok()?;
+        if wx >= ox && wx < ox + sw && wy >= oy && wy < oy + sh {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Internal helper — captures what the user is looking at.
+fn capture_focused_window(requested_app: Option<String>) -> Result<CaptureResult, String> {
     let tmp_png = "/tmp/samuel-screen.png";
     let tmp_jpg = "/tmp/samuel-screen.jpg";
     let debug_jpg = "/tmp/samuel-screen-debug.jpg";
 
-    let app_output = Command::new("/usr/bin/osascript")
-        .args(["-e", "tell application \"System Events\" to get name of first application process whose frontmost is true"])
-        .output()
-        .map_err(|e| format!("Get frontmost app: {e}"))?;
-    let frontmost_app = String::from_utf8_lossy(&app_output.stdout).trim().to_string();
-    eprintln!("[capture] frontmost app: {frontmost_app}");
+    // Resolve which app to target
+    let target_app = if let Some(ref name) = requested_app {
+        // User/model specified an app by name — find the best match from visible apps
+        let script = r#"tell application "System Events"
+  set appList to name of every application process whose visible is true
+  set output to ""
+  repeat with a in appList
+    set output to output & a & linefeed
+  end repeat
+  return output
+end tell"#;
+        let app_output = Command::new("/usr/bin/osascript")
+            .args(["-e", script])
+            .output()
+            .map_err(|e| format!("Get app list: {e}"))?;
+        let app_list_raw = String::from_utf8_lossy(&app_output.stdout);
+        let needle = name.to_lowercase();
+        app_list_raw
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .find(|l| l.to_lowercase().contains(&needle))
+    } else {
+        None
+    };
 
-    let capture_result = run_peekaboo(&[
-        "image",
-        "--app", &frontmost_app,
-        "--format", "png",
-        "--path", tmp_png,
-    ]);
+    let app_label = target_app.clone()
+        .or_else(|| requested_app.clone())
+        .unwrap_or_else(|| "Desktop".to_string());
+    eprintln!("[capture] target: {:?} (requested: {:?})", app_label, requested_app);
 
-    if capture_result.is_err() {
-        eprintln!("[capture] peekaboo failed for {frontmost_app}, falling back to main display");
+    let mut used_full_screen = false;
+
+    // Try peekaboo window capture for the resolved app
+    if let Some(ref app) = target_app {
+        let _ = run_peekaboo(&[
+            "image", "--app", app, "--format", "png", "--path", tmp_png,
+        ]);
+    }
+
+    let peekaboo_ok = fs::metadata(tmp_png)
+        .map(|m| m.len() > 10_000)
+        .unwrap_or(false);
+
+    if !peekaboo_ok {
+        let _ = fs::remove_file(tmp_png);
+
+        // Decide which display to capture
+        let display_idx = if let Some(ref app) = target_app {
+            find_display_for_app(app).unwrap_or_else(|| DEFAULT_DISPLAY.load(Ordering::Relaxed))
+        } else {
+            DEFAULT_DISPLAY.load(Ordering::Relaxed)
+        };
+
+        eprintln!("[capture] falling back to display {display_idx}");
+        let d_flag = format!("-D{display_idx}");
         let sc = Command::new("/usr/sbin/screencapture")
-            .args(["-x", "-D1", tmp_png])
+            .args(["-x", &d_flag, tmp_png])
             .output()
             .map_err(|e| format!("screencapture failed: {e}"))?;
         if !sc.status.success() {
             return Err("screencapture failed".to_string());
         }
+        used_full_screen = true;
     }
 
     let data = fs::read(tmp_png).map_err(|e| format!("Read capture: {e}"))?;
@@ -427,13 +590,26 @@ fn capture_focused_window() -> Result<String, String> {
     };
 
     let jpg_data = fs::read(final_path).map_err(|e| format!("Read JPEG: {e}"))?;
-    eprintln!("[capture] focused window JPEG: {} bytes", jpg_data.len());
+    eprintln!("[capture] final JPEG: {} bytes (full_screen={})", jpg_data.len(), used_full_screen);
 
     let _ = fs::copy(final_path, debug_jpg);
     let _ = fs::remove_file(final_path);
 
+    let label = if used_full_screen {
+        let d = if let Some(ref app) = target_app {
+            find_display_for_app(app)
+                .map(|i| format!("Display {i}"))
+                .unwrap_or_else(|| format!("Display {}", DEFAULT_DISPLAY.load(Ordering::Relaxed)))
+        } else {
+            format!("Display {}", DEFAULT_DISPLAY.load(Ordering::Relaxed))
+        };
+        format!("{d} ({app_label})")
+    } else {
+        app_label
+    };
+
     let b64 = base64::engine::general_purpose::STANDARD.encode(&jpg_data);
-    Ok(b64)
+    Ok(CaptureResult { base64: b64, app_name: label })
 }
 
 // ---------------------------------------------------------------------------

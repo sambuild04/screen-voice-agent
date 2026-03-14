@@ -5,11 +5,17 @@
  */
 
 type SendImageFn = (base64Jpeg: string) => void;
+type ScreenTargetFn = (appName: string) => void;
 
 let sendImageFn: SendImageFn | null = null;
+let screenTargetFn: ScreenTargetFn | null = null;
 
 export function registerSendImage(fn: SendImageFn | null) {
   sendImageFn = fn;
+}
+
+export function registerScreenTarget(fn: ScreenTargetFn | null) {
+  screenTargetFn = fn;
 }
 
 /**
@@ -20,4 +26,9 @@ export function sendImageToSession(base64Jpeg: string): boolean {
   if (!sendImageFn) return false;
   sendImageFn(base64Jpeg);
   return true;
+}
+
+/** Notify the UI which app/window the agent just captured. */
+export function notifyScreenTarget(appName: string) {
+  screenTargetFn?.(appName);
 }

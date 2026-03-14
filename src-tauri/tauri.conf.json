@@ -10,14 +10,18 @@
     "beforeBuildCommand": "npm run ui:build"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "Samuel",
-        "width": 480,
-        "height": 720,
+        "width": 360,
+        "height": 480,
         "resizable": true,
         "fullscreen": false,
-        "transparent": false
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true
       }
     ],
     "security": {
