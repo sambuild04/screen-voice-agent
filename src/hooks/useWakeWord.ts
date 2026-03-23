@@ -8,10 +8,9 @@ interface UseWakeWordOptions {
   onDetected: () => void;
 }
 
-function containsWakeWord(text: string): boolean {
+function containsFullWakeWord(text: string): boolean {
   const lower = text.toLowerCase().replace(/[.,!?'"]/g, "").trim();
   if (!lower) return false;
-  // Require "hey" (or common misheard variants) before "samuel"/"sam"
   return (
     lower.includes("hey samuel") ||
     lower.includes("hay samuel") ||
@@ -21,9 +20,25 @@ function containsWakeWord(text: string): boolean {
   );
 }
 
+function containsHeyOnly(text: string): boolean {
+  const lower = text.toLowerCase().replace(/[.,!?'"]/g, "").trim();
+  return lower === "hey" || lower === "hay" || lower === "hate" || lower === "hey.";
+}
+
+function containsSamuelOnly(text: string): boolean {
+  const lower = text.toLowerCase().replace(/[.,!?'"]/g, "").trim();
+  return (
+    lower.includes("samuel") ||
+    lower.includes("samual") ||
+    lower.includes("samuell") ||
+    (lower.includes("sam") && !lower.includes("same") && !lower.includes("sample"))
+  );
+}
+
 /**
- * Dead-simple wake word: MediaRecorder records 3s clips in a loop,
- * each clip sent to Whisper API, checked for "Hey Samuel".
+ * Wake word detection: records 3s clips in a loop, sends to Whisper,
+ * checks for "Hey Samuel". Uses a partial-match buffer so "Hey" in
+ * one clip + "Samuel" in the next still triggers detection.
  */
 export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
   const [state, setState] = useState<WakeWordState>("off");
@@ -60,17 +75,59 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
         return;
       }
 
-      console.log("[wake] mic acquired, starting record loop");
+      console.log("[wake] mic acquired, starting continuous listen loop");
       setState("listening");
 
+      let heardHey = false;
+      let heardHeyAt = 0;
+      let pendingTranscription: Promise<string> | null = null;
+
       while (active) {
-        // Record a 2-second clip — shorter = faster wake word response
-        const clip = await recordClip(stream, 2000);
+        // Start recording and transcription in parallel — the next clip
+        // records while the previous one is being transcribed, so there's
+        // never a gap in listening.
+        const clipPromise = recordClip(stream, 3000);
+
+        // Process the pending transcription result (if any) while recording
+        if (pendingTranscription) {
+          try {
+            const text = await pendingTranscription;
+            console.log(`[wake] whisper: "${text}"`);
+
+            if (active && containsFullWakeWord(text)) {
+              console.log("[wake] >>> DETECTED (full match) <<<");
+              setState("detected");
+              onDetectedRef.current();
+              return;
+            }
+
+            if (active && heardHey && Date.now() - heardHeyAt < 5000 && containsSamuelOnly(text)) {
+              console.log("[wake] >>> DETECTED (cross-clip: Hey + Samuel) <<<");
+              setState("detected");
+              onDetectedRef.current();
+              return;
+            }
+
+            if (containsHeyOnly(text)) {
+              heardHey = true;
+              heardHeyAt = Date.now();
+            } else if (!containsSamuelOnly(text)) {
+              heardHey = false;
+            }
+          } catch (err) {
+            console.error("[wake] error:", err);
+          }
+        }
+
+        // Wait for the current clip to finish recording
+        const clip = await clipPromise;
         if (!active || !clip) break;
 
-        // Convert to base64
         const arrayBuf = await clip.arrayBuffer();
-        if (arrayBuf.byteLength < 500) continue; // too small
+        if (arrayBuf.byteLength < 500) {
+          pendingTranscription = null;
+          continue;
+        }
 
         const bytes = new Uint8Array(arrayBuf);
         let raw = "";
@@ -85,29 +142,12 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
         console.log(
           `[wake] recorded ${(arrayBuf.byteLength / 1024).toFixed(1)}KB (${clip.type})`,
         );
-        setState("processing");
 
-        try {
-          const text = await invoke<string>("transcribe_audio", {
-            audioBase64: base64,
-            extension: ext,
-          });
-
-          console.log(`[wake] whisper: "${text}"`);
-
-          if (active && containsWakeWord(text)) {
-            console.log("[wake] >>> DETECTED <<<");
-            setState("detected");
-            onDetectedRef.current();
-            return;
-          }
-        } catch (err) {
-          console.error("[wake] error:", err);
-        }
-
-        if (active) setState("listening");
-        // Brief pause before next recording
-        await sleep(100);
+        // Fire off transcription — it runs while the next clip records
+        pendingTranscription = invoke<string>("transcribe_audio", {
+          audioBase64: base64,
+          extension: ext,
+        });
       }
     }
 
@@ -156,8 +196,4 @@ function recordClip(stream: MediaStream, durationMs: number): Promise<Blob | nul
       if (recorder.state === "recording") recorder.stop();
     }, durationMs);
   });
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
 }

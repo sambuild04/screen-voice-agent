@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage } from "./session-bridge";
 
 interface CaptureResult {
   base64: string;
@@ -9,6 +9,49 @@ interface CaptureResult {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const getCurrentTimeTool = tool({
+  name: "get_current_time",
+  description:
+    "Get the user's current local date, time, day of week, and timezone. " +
+    "Use this when the user asks what time it is, what day it is, or anything time-related.",
+  parameters: z.object({}),
+  execute() {
+    const now = new Date();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return JSON.stringify({
+      date: now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" }),
+      time: now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true }),
+      timezone: tz,
+      iso: now.toISOString(),
+    });
+  },
+});
+
+const setLearningLanguageTool = tool({
+  name: "set_learning_language",
+  description:
+    "Activate or deactivate learning mode for a specific language. " +
+    "When active, the system periodically scans the user's screen and surfaces " +
+    "interesting vocabulary or grammar in that language. " +
+    "Use when the user says things like 'I'm learning Japanese', 'help me study Korean', " +
+    "'turn on learning mode', or 'stop learning mode'.",
+  parameters: z.object({
+    language: z
+      .string()
+      .describe(
+        "The language to learn, e.g. 'Japanese', 'Korean', 'Chinese', 'Spanish'. " +
+        "Use an empty string to deactivate learning mode.",
+      ),
+  }),
+  execute({ language }) {
+    const lang = language.trim();
+    notifyLearningLanguage(lang || null);
+    return lang
+      ? `Learning mode activated for ${lang}. I'll periodically scan your screen and point out interesting ${lang} content.`
+      : "Learning mode deactivated. I'll stop scanning your screen for language content.";
+  },
+});
 
 // Captures the Apple Books page and injects it into the Realtime session.
 const readPageTool = tool({
@@ -383,6 +426,14 @@ Moderate. Unhurried but not slow. Brisk when confirming actions.
 - When you receive a [System: A language analysis just completed...] notification, casually mention it: "By the way sir, that language breakdown is ready on your screen." Then mention 1-2 highlights. Don't interrupt an ongoing topic abruptly.
 - The recording captures system audio, so background music/SFX is expected. Whisper handles this well with Japanese language mode.
 
+# How to Help — Learning Mode (Active Screen Scanning)
+- When the user says they are learning a language (e.g. "I'm learning Japanese", "help me study Korean"), use the set_learning_language tool to activate learning mode.
+- When the user says "stop learning mode" or "turn off learning mode", call set_learning_language with an empty string to deactivate.
+- When you receive [System: Learning mode — spotted...] hints, briefly and naturally mention what was found (1-2 sentences max). Keep it conversational and helpful: "I notice there's an interesting word on your screen — 食べる means 'to eat', sir."
+- Don't repeat hints the user has already seen recently.
+- If the user is watching video/anime in the target language, suggest using Record Mode ("start recording") for deeper analysis.
+- Learning mode checks happen every 90 seconds in the background. You don't need to do anything — just respond naturally when hints arrive.
+
 # General
 - Keep spoken summaries concise but thorough.
 - Never break character. You are Samuel.`;
@@ -402,5 +453,7 @@ export const samuelAgent = new RealtimeAgent({
     pronounceTool,
     startRecordingTool,
     stopRecordingTool,
+    getCurrentTimeTool,
+    setLearningLanguageTool,
   ],
 });

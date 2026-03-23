@@ -29,8 +29,8 @@ pub async fn transcribe_audio(audio_base64: String, extension: String) -> Result
         audio_bytes.len() as f64 / 1024.0
     );
 
-    // Prompt priming: Whisper uses this to expect specific vocabulary,
-    // dramatically improving detection of "Hey Samuel" over hallucinations.
+    // gpt-4o-mini-transcribe: higher quality than whisper-1, fewer
+    // hallucinations on silence, and supports instruction-like prompts.
     let output = Command::new("curl")
         .args([
             "-s",
@@ -44,11 +44,11 @@ pub async fn transcribe_audio(audio_base64: String, extension: String) -> Result
             "-F",
             &format!("file=@{tmp_path}"),
             "-F",
-            "model=whisper-1",
+            "model=gpt-4o-mini-transcribe",
             "-F",
             "language=en",
             "-F",
-            "prompt=Hey Samuel",
+            "prompt=The user is trying to say the wake phrase 'Hey Samuel' to activate a voice assistant. Transcribe exactly what they say. If the audio is silence or background noise, return an empty string.",
         ])
         .output()
         .map_err(|e| format!("curl error: {e}"))?;

@@ -20,8 +20,14 @@ export interface GrammarPoint {
   examples: string[];
 }
 
+export interface TranslatedLine {
+  timestamp: string;
+  text: string;
+}
+
 export interface RecordingAnalysis {
   transcript: ScriptLine[];
+  translated_transcript: TranslatedLine[];
   vocabulary: VocabEntry[];
   grammar: GrammarPoint[];
   summary: string;

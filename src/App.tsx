@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
+import { useLearningMode } from "./hooks/useLearningMode";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
@@ -22,6 +23,7 @@ export default function App() {
   } = useRealtime();
 
   const record = useRecordMode();
+  const learning = useLearningMode(status);
   const [awaitingWake, setAwaitingWake] = useState(true);
 
   // Keep the session alive during recording and while viewing results
@@ -160,6 +162,8 @@ export default function App() {
         onDismissAnalysis={record.dismiss}
         onTogglePanel={record.togglePanel}
         onClearAnalysis={record.clearAnalysis}
+        learningLanguage={learning.learningLanguage}
+        learningActive={learning.learningActive}
       />
     </div>
   );

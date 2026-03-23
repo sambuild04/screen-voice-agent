@@ -27,6 +27,7 @@ const TEMP_FILES: &[&str] = &[
     "/tmp/samuel-wake-audio.mp4",
     "/tmp/samuel-wake-debug.webm",
     "/tmp/samuel-wake-debug.mp4",
+    "/tmp/samuel-learning-req.json",
 ];
 
 /// Remove leftover temp files from previous sessions.
@@ -1077,6 +1078,7 @@ pub struct GrammarPoint {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RecordingAnalysis {
     pub transcript: Vec<ScriptLine>,
+    pub translated_transcript: Vec<ScriptLine>,
     pub vocabulary: Vec<VocabEntry>,
     pub grammar: Vec<GrammarPoint>,
     pub summary: String,
@@ -1187,9 +1189,11 @@ pub async fn analyze_recording() -> Result<RecordingAnalysis, String> {
         return Err("No recording file found — record first".to_string());
     }
 
-    eprintln!("[recording] transcribing with Whisper (ja)...");
+    eprintln!("[recording] transcribing with gpt-4o-transcribe (ja)...");
 
-    // Step 1: Transcribe with Whisper, forced to Japanese, verbose JSON for timestamps
+    // Step 1: Transcribe with gpt-4o-transcribe — much better at capturing
+    // anime dialogue under background music/SFX than whisper-1.
+    // Returns json format (no verbose_json with per-segment timestamps).
     let whisper_output = Command::new("curl")
         .args([
             "-s",
@@ -1198,26 +1202,25 @@ pub async fn analyze_recording() -> Result<RecordingAnalysis, String> {
             "https://api.openai.com/v1/audio/transcriptions",
             "-H", &format!("Authorization: Bearer {api_key}"),
             "-F", &format!("file=@{RECORDING_PATH}"),
-            "-F", "model=whisper-1",
-            "-F", "language=ja",
-            "-F", "response_format=verbose_json",
+            "-F", "model=gpt-4o-transcribe",
+            "-F", "prompt=Transcribe the dialogue from this video/anime clip accurately. There may be background music and sound effects. Ignore any system messages at the very start like 'Recording has started'.",
         ])
         .output()
-        .map_err(|e| format!("curl whisper: {e}"))?;
+        .map_err(|e| format!("curl transcribe: {e}"))?;
 
     if !whisper_output.status.success() {
         return Err(format!(
-            "Whisper API error: {}",
+            "Transcribe API error: {}",
             String::from_utf8_lossy(&whisper_output.stderr)
         ));
     }
 
     let whisper_body: serde_json::Value = serde_json::from_slice(&whisper_output.stdout)
-        .map_err(|e| format!("parse whisper response: {e}"))?;
+        .map_err(|e| format!("parse transcribe response: {e}"))?;
 
     if let Some(err) = whisper_body.get("error") {
         return Err(format!(
-            "Whisper API: {}",
+            "Transcribe API: {}",
             err["message"].as_str().unwrap_or("unknown")
         ));
     }
@@ -1227,23 +1230,37 @@ pub async fn analyze_recording() -> Result<RecordingAnalysis, String> {
         .unwrap_or("")
         .to_string();
 
-    // Build transcript lines from segments
+    // gpt-4o-transcribe returns plain text without segment timestamps.
+    // Split by sentence-ending punctuation (supports CJK and Latin).
     let mut transcript_lines: Vec<ScriptLine> = Vec::new();
-    if let Some(segments) = whisper_body["segments"].as_array() {
-        for seg in segments {
-            let start_secs = seg["start"].as_f64().unwrap_or(0.0);
-            let mins = (start_secs / 60.0).floor() as u32;
-            let secs = (start_secs % 60.0).floor() as u32;
-            transcript_lines.push(ScriptLine {
-                timestamp: format!("{mins}:{secs:02}"),
-                text: seg["text"].as_str().unwrap_or("").trim().to_string(),
-            });
+    let mut current = String::new();
+    let terminators = ['。', '！', '？', '!', '?', '.'];
+    for ch in full_text.chars() {
+        current.push(ch);
+        if terminators.contains(&ch) {
+            let trimmed = current.trim().to_string();
+            if !trimmed.is_empty() {
+                transcript_lines.push(ScriptLine {
+                    timestamp: format!("#{}", transcript_lines.len() + 1),
+                    text: trimmed,
+                });
+            }
+            current.clear();
         }
+    }
+    // Leftover text without a terminator
+    let leftover = current.trim().to_string();
+    if !leftover.is_empty() {
+        transcript_lines.push(ScriptLine {
+            timestamp: format!("#{}", transcript_lines.len() + 1),
+            text: leftover,
+        });
     }
 
     if full_text.is_empty() {
         return Ok(RecordingAnalysis {
             transcript: transcript_lines,
+            translated_transcript: vec![],
             vocabulary: vec![],
             grammar: vec![],
             summary: "No speech detected in the recording.".to_string(),
@@ -1258,26 +1275,33 @@ pub async fn analyze_recording() -> Result<RecordingAnalysis, String> {
 
     // Step 2: Analyze with GPT-4o
     let analysis_prompt = format!(
-        r#"You are a Japanese language tutor. Analyze the following Japanese transcript from an anime/video clip. The audio may contain background music/SFX, so some parts may be noisy or unclear — do your best.
+        r#"You are a language tutor. Analyze the following transcript from a video/anime clip. First detect what language is being spoken, then provide a full breakdown. The audio may contain background music/SFX — do your best.
+
+NOTE: Ignore any system messages at the start (e.g. "Recording has started" or instructions about recording). Focus only on the actual dialogue.
 
 Transcript:
 {full_text}
 
 Return a JSON object with exactly these fields:
 {{
+  "translated_transcript": [
+    {{ "original": "original line in source language", "translation": "English translation" }}
+  ],
   "vocabulary": [
-    {{ "word": "漢字", "reading": "かんじ", "meaning": "kanji; Chinese characters", "level": "N4" }}
+    {{ "word": "original word", "reading": "pronunciation/reading aid", "meaning": "English meaning", "level": "proficiency level" }}
   ],
   "grammar": [
-    {{ "pattern": "〜てしまう", "explanation": "Indicates completion or regret. Casual form: 〜ちゃう", "examples": ["食べてしまった — I ended up eating it", "忘れちゃった — I accidentally forgot"] }}
+    {{ "pattern": "grammar pattern name", "explanation": "Clear explanation in English", "examples": ["actual phrase from transcript that uses this pattern"] }}
   ],
   "summary": "Brief English summary of what was said (2-3 sentences)"
 }}
 
 Guidelines:
-- Include ALL meaningful vocabulary (not particles alone). Include common words too for beginners.
-- For vocabulary: word in kanji, reading in hiragana, English meaning, JLPT level estimate (N5-N1 or "—" if unsure).
-- For grammar: ONLY include grammar patterns that actually appear in the transcript above. Do NOT add grammar points that are not used in the clip. For each pattern, quote the exact phrase from the transcript where it appears, explain it simply, and give 1 example sentence.
+- Detect the language automatically from the transcript.
+- For translated_transcript: include every meaningful dialogue line from the transcript with its English translation. Keep the original text exactly as transcribed.
+- Include ALL meaningful vocabulary. Include common words too for beginners.
+- For vocabulary: word in original script, reading/pronunciation aid (e.g. hiragana for Japanese, pinyin for Chinese, romaji, etc.), English meaning, proficiency level (e.g. JLPT N5-N1 for Japanese, HSK 1-6 for Chinese, CEFR A1-C2 for European languages, or "—" if unsure).
+- For grammar: extract grammar patterns that are actually used in the transcript. For each one, put the pattern name in "pattern", a clear explanation in "explanation", and in "examples" include the actual phrase from the transcript that uses this pattern. Every transcript has grammar — identify at least the key conjugations, sentence forms, and speech patterns.
 - Summary should explain the scene/conversation briefly in English.
 - Return ONLY valid JSON, no markdown fences."#
     );
@@ -1333,6 +1357,12 @@ Guidelines:
         .trim_end_matches("```")
         .trim();
 
+    eprintln!("[recording] raw GPT grammar: {:?}",
+        serde_json::from_str::<serde_json::Value>(cleaned)
+            .ok()
+            .and_then(|v| v.get("grammar").cloned())
+    );
+
     let analysis: serde_json::Value = serde_json::from_str(cleaned).unwrap_or_else(|_| {
         serde_json::json!({
             "vocabulary": [],
@@ -1340,6 +1370,20 @@ Guidelines:
             "summary": content
         })
     });
+
+    let translated_transcript: Vec<ScriptLine> = analysis["translated_transcript"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some(ScriptLine {
+                        timestamp: t["original"].as_str()?.to_string(),
+                        text: t["translation"].as_str().unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     let vocabulary: Vec<VocabEntry> = analysis["vocabulary"]
         .as_array()
@@ -1392,8 +1436,118 @@ Guidelines:
 
     Ok(RecordingAnalysis {
         transcript: transcript_lines,
+        translated_transcript,
         vocabulary,
         grammar,
         summary,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Learning Mode — periodic screen scan for target language content
+// ---------------------------------------------------------------------------
+
+/// Capture the active window and ask GPT-4o Vision whether the target language
+/// is visible. Returns `Some(hints)` with a short voice-friendly summary of
+/// interesting vocabulary/grammar, or `None` if nothing relevant is found.
+#[tauri::command]
+pub async fn check_screen_for_language(language: String) -> Result<Option<String>, String> {
+    let config = read_config_internal()?;
+    let api_key = config
+        .api_key
+        .ok_or("No API key configured")?;
+
+    let capture = capture_focused_window(None)?;
+    let b64 = &capture.base64;
+
+    if b64.len() < 100 {
+        return Ok(None);
+    }
+
+    let prompt = format!(
+        "Scan this screenshot for any {language} text (subtitles, UI, articles, chat, etc). \
+         If you find {language} text, pick 1-2 interesting words or grammar patterns a learner \
+         would benefit from knowing. Give a brief, voice-friendly explanation (2-3 sentences max). \
+         If there is no {language} text visible at all, respond with exactly: NONE"
+    );
+
+    let request_body = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "system",
+                "content": format!(
+                    "You are a {language} language learning assistant. \
+                     You scan screenshots and highlight interesting vocabulary or grammar \
+                     for a learner. Keep responses very short and suitable for a voice assistant."
+                )
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": prompt },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/jpeg;base64,{b64}"),
+                            "detail": "low"
+                        }
+                    }
+                ]
+            }
+        ],
+        "max_tokens": 300
+    });
+
+    let body_str = serde_json::to_string(&request_body)
+        .map_err(|e| format!("JSON error: {e}"))?;
+
+    let body_path = "/tmp/samuel-learning-req.json";
+    fs::write(body_path, &body_str)
+        .map_err(|e| format!("Write request: {e}"))?;
+
+    let output = Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "20",
+            "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-H", "Content-Type: application/json",
+            "--data-binary", &format!("@{body_path}"),
+        ])
+        .output()
+        .map_err(|e| format!("Vision API: {e}"))?;
+
+    let _ = fs::remove_file(body_path);
+
+    if !output.status.success() {
+        return Err(format!("curl failed: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+
+    let response_str = String::from_utf8_lossy(&output.stdout).to_string();
+    if response_str.is_empty() {
+        return Ok(None);
+    }
+
+    let response: serde_json::Value = serde_json::from_str(&response_str)
+        .map_err(|e| format!("Parse response: {e}"))?;
+
+    if response.get("error").is_some() {
+        return Ok(None);
+    }
+
+    let text = response["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("NONE")
+        .trim()
+        .to_string();
+
+    eprintln!("[learning-mode] screen check result: {}", &text[..text.len().min(100)]);
+
+    if text == "NONE" || text.to_uppercase().starts_with("NONE") {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
 }

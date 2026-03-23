@@ -246,6 +246,27 @@ html, body, #root {
   animation: recording-pulse 1s ease-in-out infinite;
 }
 
+/* ── Learning Mode Badge ─────────────────────────────────── */
+.learning-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 14px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.12);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  animation: badge-in 0.3s ease-out;
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 10;
+}
+
 /* ── Analysis Progress Bar ───────────────────────────────── */
 .analysis-progress-bar {
   position: absolute;
@@ -497,7 +518,7 @@ html, body, #root {
 .script-lines {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 .script-line {
@@ -505,6 +526,29 @@ html, body, #root {
   gap: 10px;
   font-size: 14px;
   line-height: 1.5;
+}
+
+.script-line-bilingual {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 2px solid rgba(99, 102, 241, 0.4);
+}
+
+.script-original {
+  font-size: 14px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.script-translation {
+  font-size: 13px;
+  line-height: 1.4;
+  color: rgba(148, 163, 184, 0.85);
+  font-style: italic;
 }
 
 .script-timestamp {

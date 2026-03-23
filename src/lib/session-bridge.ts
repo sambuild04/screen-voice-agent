@@ -8,11 +8,15 @@ type SendImageFn = (base64Jpeg: string) => void;
 type SendTextFn = (text: string) => void;
 type ScreenTargetFn = (appName: string) => void;
 type RecordingActionFn = (action: "start" | "stop" | "processing" | "analyze" | "results" | "error", payload?: unknown) => void;
+type LearningLanguageFn = (language: string | null) => void;
+type SendTextAndRespondFn = (text: string) => void;
 
 let sendImageFn: SendImageFn | null = null;
 let sendTextFn: SendTextFn | null = null;
 let screenTargetFn: ScreenTargetFn | null = null;
 let recordingActionFn: RecordingActionFn | null = null;
+let learningLanguageFn: LearningLanguageFn | null = null;
+let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 
 export function registerSendImage(fn: SendImageFn | null) {
   sendImageFn = fn;
@@ -58,4 +62,31 @@ export function registerRecordingAction(fn: RecordingActionFn | null) {
 /** Notify the UI about a recording state change. */
 export function notifyRecordingAction(action: "start" | "stop" | "processing" | "analyze" | "results" | "error", payload?: unknown) {
   recordingActionFn?.(action, payload);
+}
+
+// ---------------------------------------------------------------------------
+// Learning Mode bridge
+// ---------------------------------------------------------------------------
+
+export function registerLearningLanguage(fn: LearningLanguageFn | null) {
+  learningLanguageFn = fn;
+}
+
+/** Called by Samuel's set_learning_language tool to activate/deactivate learning mode. */
+export function notifyLearningLanguage(language: string | null) {
+  learningLanguageFn?.(language);
+}
+
+export function registerSendTextAndRespond(fn: SendTextAndRespondFn | null) {
+  sendTextAndRespondFn = fn;
+}
+
+/**
+ * Inject a text message into the session and trigger a model response.
+ * Used by the learning mode hook to surface hints proactively.
+ */
+export function sendTextAndRespond(text: string): boolean {
+  if (!sendTextAndRespondFn) return false;
+  sendTextAndRespondFn(text);
+  return true;
 }

@@ -19,6 +19,8 @@ interface CharacterProps {
   onDismissAnalysis: () => void;
   onTogglePanel: () => void;
   onClearAnalysis: () => void;
+  learningLanguage: string | null;
+  learningActive: boolean;
 }
 
 const STATE_MACHINE = "State Machine 1";
@@ -43,6 +45,8 @@ export function Character({
   onDismissAnalysis,
   onTogglePanel,
   onClearAnalysis,
+  learningLanguage,
+  learningActive,
 }: CharacterProps) {
   const { rive, RiveComponent } = useRive({
     src: "/character.riv",
@@ -112,6 +116,13 @@ export function Character({
             />
           </div>
           <div className="analysis-progress-time">{formatTime(analysisElapsed)}</div>
+        </div>
+      )}
+
+      {/* Learning mode indicator */}
+      {learningLanguage && learningActive && (
+        <div className="learning-badge">
+          <GraduationCapIcon /> Learning: {learningLanguage}
         </div>
       )}
 
@@ -199,7 +210,19 @@ export function Character({
               <p className="analysis-summary">{analysis.summary}</p>
             </div>
 
-            {analysis.transcript.length > 0 && (
+            {analysis.translated_transcript.length > 0 ? (
+              <div className="analysis-section">
+                <h3 className="analysis-section-title">Script &amp; Translation</h3>
+                <div className="script-lines">
+                  {analysis.translated_transcript.map((line, i) => (
+                    <div key={i} className="script-line-bilingual">
+                      <div className="script-original">{line.timestamp}</div>
+                      <div className="script-translation">{line.text}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : analysis.transcript.length > 0 ? (
               <div className="analysis-section">
                 <h3 className="analysis-section-title">Script</h3>
                 <div className="script-lines">
@@ -211,7 +234,7 @@ export function Character({
                   ))}
                 </div>
               </div>
-            )}
+            ) : null}
 
             {analysis.vocabulary.length > 0 && (
               <div className="analysis-section">
@@ -270,6 +293,15 @@ function EyeIcon() {
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function GraduationCapIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
+      <path d="M6 12v5c3 3 9 3 12 0v-5" />
     </svg>
   );
 }

@@ -58,6 +58,7 @@ pub fn run() {
             start_recording,
             stop_recording,
             analyze_recording,
+            check_screen_for_language,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

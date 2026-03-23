@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendTextAndRespond } from "../lib/session-bridge";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -203,6 +203,10 @@ export function useRealtime(): UseRealtimeReturn {
       ]);
     });
 
+    // Detect server-side session close (idle timeout, network drop, etc.)
+    // so the next wake word triggers a fresh reconnect.
+    // Handled via transport wildcard events ("session.closed" / "close").
+
     // Raw transport events for real-time transcript display
     session.transport.on("*", (event: Record<string, unknown>) => {
       const type = event.type as string;
@@ -355,6 +359,14 @@ export function useRealtime(): UseRealtimeReturn {
           break;
         }
 
+        case "session.closed":
+        case "close": {
+          console.log("[session] transport closed");
+          setStatus("disconnected");
+          setAgentState("idle");
+          break;
+        }
+
         default:
           break;
       }
@@ -397,10 +409,24 @@ export function useRealtime(): UseRealtimeReturn {
       });
     });
 
+    // Bridge for learning mode: inject a system hint and trigger Samuel to respond
+    registerSendTextAndRespond((text: string) => {
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      });
+      session.transport.sendEvent({ type: "response.create" });
+    });
+
     return () => {
       registerSendImage(null);
       registerSendText(null);
       registerScreenTarget(null);
+      registerSendTextAndRespond(null);
       session.close();
       sessionRef.current = null;
     };
@@ -408,9 +434,14 @@ export function useRealtime(): UseRealtimeReturn {
   }, []);
 
   const connect = useCallback(async () => {
+    if (status === "connected") return;
+    // If the previous session died (server timeout), close it cleanly
+    // so the SDK lets us reconnect.
+    if (sessionRef.current) {
+      try { sessionRef.current.close(); } catch {}
+    }
     const session = sessionRef.current;
     if (!session) return;
-    if (status === "connected") return;
 
     setStatus("connecting");
     setTranscript([makeEntry("status", "Connecting...")]);
@@ -427,6 +458,19 @@ export function useRealtime(): UseRealtimeReturn {
       // can't pick up the very start of Samuel's voice.
       agentResponseCountRef.current = 0;
       session.mute(true);
+
+      // Inject local time so Samuel's greeting is time-appropriate
+      const now = new Date();
+      const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Use this for a time-appropriate greeting.]`;
+      session.transport.sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: timeCtx }],
+        },
+      });
+
       session.transport.sendEvent({ type: "response.create" });
     } catch (err) {
       console.error("[connect]", err);
