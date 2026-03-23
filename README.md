@@ -8,7 +8,7 @@ Built with Tauri v2, OpenAI Realtime API, GPT-5.4 Computer Use, GPT-4o Vision, R
 
 ## Demo
 
-https://github.com/user-attachments/assets/b43b1177-82b0-4153-91b1-f3d2d12adddf
+https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
 ## How It Works
 
