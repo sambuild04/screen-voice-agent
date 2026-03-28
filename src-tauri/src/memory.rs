@@ -8,6 +8,8 @@ const MEMORY_FILE: &str = "memory.json";
 const MAX_RECENT_OBSERVATIONS: usize = 10;
 const MAX_RECENT_TRANSCRIPTS: usize = 5;
 const VOCABULARY_COOLDOWN_SECS: u64 = 24 * 60 * 60;
+/// Vocabulary marked as permanently known never expires
+const PERMANENT_KNOWN: u64 = u64::MAX;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SamuelMemory {
@@ -94,16 +96,33 @@ pub fn get_context() -> String {
         }
 
         let now = now_secs();
+
+        // Permanently known words — user explicitly said they know these
+        let known_forever: Vec<&str> = mem
+            .vocabulary_seen
+            .iter()
+            .filter(|(_, &ts)| ts == PERMANENT_KNOWN)
+            .map(|(w, _)| w.as_str())
+            .take(30)
+            .collect();
+        if !known_forever.is_empty() {
+            parts.push(format!(
+                "User already knows (NEVER mention): {}",
+                known_forever.join(", ")
+            ));
+        }
+
+        // Recently taught — 24h cooldown
         let recent_vocab: Vec<&str> = mem
             .vocabulary_seen
             .iter()
-            .filter(|(_, &ts)| now.saturating_sub(ts) < VOCABULARY_COOLDOWN_SECS)
+            .filter(|(_, &ts)| ts != PERMANENT_KNOWN && now.saturating_sub(ts) < VOCABULARY_COOLDOWN_SECS)
             .map(|(w, _)| w.as_str())
             .take(15)
             .collect();
         if !recent_vocab.is_empty() {
             parts.push(format!(
-                "Already taught (don't repeat): {}",
+                "Recently taught (don't repeat today): {}",
                 recent_vocab.join(", ")
             ));
         }
@@ -147,6 +166,15 @@ pub fn record_vocabulary(words: &[String]) {
     });
 }
 
+/// Mark vocabulary as permanently known — will never be mentioned again
+pub fn mark_known(words: &[String]) {
+    with_memory(|mem| {
+        for word in words {
+            mem.vocabulary_seen.insert(word.clone(), PERMANENT_KNOWN);
+        }
+    });
+}
+
 pub fn set_fact(key: &str, value: &str) {
     with_memory(|mem| {
         mem.facts.insert(key.to_string(), value.to_string());
@@ -162,5 +190,12 @@ pub async fn memory_get_context() -> Result<String, String> {
 pub async fn memory_set_fact(key: String, value: String) -> Result<(), String> {
     set_fact(&key, &value);
     eprintln!("[memory] fact: {key} = {value}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn memory_mark_known(words: Vec<String>) -> Result<(), String> {
+    eprintln!("[memory] marking as permanently known: {}", words.join(", "));
+    mark_known(&words);
     Ok(())
 }

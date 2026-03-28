@@ -1894,7 +1894,9 @@ Rules:
 - "act": Genuinely interesting and specific. A new word, unusual grammar, or a great cross-language teaching moment. Worth speaking aloud.
 - IMPORTANT: Observations do NOT need to be in {language} to be valuable. Teaching the {language} equivalent of interesting English content IS valuable — treat those as notify or act, not ignore.
 - Be conservative — silence (ignore) is better than interrupting needlessly, but a good cross-language teaching moment IS worth surfacing.
-- If the observation mentions words listed in "Already taught", classify as ignore.
+- If the observation mentions words listed in "User already knows (NEVER mention)", ALWAYS classify as ignore.
+- If the observation mentions words listed in "Recently taught (don't repeat today)", classify as ignore.
+- If memory shows a user proficiency level (e.g. "intermediate"), skip beginner-level content (basic greetings, numbers, common particles) and focus on content at or above their level.
 - Only "act" for truly specific, helpful observations."#
     );
 

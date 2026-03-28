@@ -69,6 +69,7 @@ pub fn run() {
             check_learning_audio,
             memory_get_context,
             memory_set_fact,
+            memory_mark_known,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
