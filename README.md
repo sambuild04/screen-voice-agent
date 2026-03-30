@@ -16,7 +16,11 @@
 
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
-### Real-Time Voice Teaching — He Speaks to You While You Watch
+### Watch Anime, Learn Japanese — Samuel Teaches by Voice While You Watch
+
+https://github.com/user-attachments/assets/338f8194-49e6-496d-b218-715af4afa1ee
+
+### Ambient Learning Mode — Screen + Audio Monitoring
 
 ![Samuel watches anime and teaches Japanese vocabulary by voice in real time](docs/samuel-learning-mode.gif)
 
