@@ -33,8 +33,8 @@ html, body, #root {
 
 /* Rive canvas container */
 .character-avatar {
-  width: 270px;
-  height: 270px;
+  width: 320px;
+  height: 320px;
   border-radius: 50%;
   overflow: hidden;
   position: relative;
@@ -651,89 +651,381 @@ html, body, #root {
   margin-bottom: 2px;
 }
 
-/* Passive suggestion card — ambient hint from learning mode */
-.passive-suggestion {
+/* ── Vocab/Grammar Card — ambient learning pop-up ────────── */
+.vocab-card {
   position: fixed;
-  bottom: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
   z-index: 100;
-  animation: slide-up 0.35s cubic-bezier(0.16, 1, 0.3, 1);
   pointer-events: auto;
-  transition: opacity 0.6s ease;
+  width: 300px;
+
+  background: rgba(10, 15, 30, 0.88);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  border-radius: 20px;
+  padding: 20px;
+  box-shadow:
+    0 0 0 1px rgba(99, 102, 241, 0.1),
+    0 20px 60px rgba(0, 0, 0, 0.5),
+    0 0 40px rgba(99, 102, 241, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+
+  animation: vocab-card-enter 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-.passive-suggestion-fade {
-  opacity: 0;
+.vocab-card-exit {
+  animation: vocab-card-leave 0.4s cubic-bezier(0.55, 0, 1, 0.45) both;
 }
 
-.passive-suggestion-inner {
+/* Timer ring — top-right corner */
+.vocab-card-timer-ring {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+}
+
+.vocab-card-timer-track {
+  stroke: rgba(255, 255, 255, 0.06);
+}
+
+.vocab-card-timer-fill {
+  stroke: rgba(99, 102, 241, 0.6);
+  transition: stroke-dasharray 0.3s ease;
+}
+
+.vocab-card-timer-text {
+  fill: rgba(255, 255, 255, 0.4);
+  font-size: 9px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-family: ui-monospace, monospace;
+}
+
+/* Source badge */
+.vocab-card-header {
+  margin-bottom: 12px;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
-  background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  padding: 10px 14px;
-  max-width: 340px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
 }
 
-.passive-suggestion-icon {
-  font-size: 16px;
+.vocab-card-source {
+  font-size: 11px;
+  color: rgba(167, 139, 250, 0.8);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+}
+
+/* Scene clip replay button */
+.vocab-card-play-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  background: rgba(99, 102, 241, 0.15);
+  color: #a78bfa;
+  font-size: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
   flex-shrink: 0;
-  margin-top: 1px;
+}
+.vocab-card-play-btn:hover {
+  background: rgba(99, 102, 241, 0.3);
+  border-color: rgba(99, 102, 241, 0.5);
+  transform: scale(1.1);
+}
+.vocab-card-play-btn:active {
+  transform: scale(0.95);
 }
 
-.passive-suggestion-text {
-  flex: 1;
-  font-size: 13px;
-  line-height: 1.45;
+/* Main content */
+.vocab-card-content {
+  font-size: 15px;
+  line-height: 1.6;
   color: #e2e8f0;
-  margin: 0;
+  margin: 0 0 18px 0;
+  word-break: break-word;
 }
 
-.passive-suggestion-actions {
+/* Action buttons row */
+.vocab-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.vocab-card-btn {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  flex-shrink: 0;
+  align-items: center;
+  gap: 3px;
+  padding: 10px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
 }
 
-.passive-suggestion-btn {
+.vocab-card-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.vocab-card-btn:active {
+  transform: scale(0.96);
+}
+
+.vocab-card-btn-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* New to me — warm amber */
+.vocab-card-btn-new {
+  border-color: rgba(251, 191, 36, 0.15);
+}
+.vocab-card-btn-new:hover {
+  background: rgba(251, 191, 36, 0.12);
+  border-color: rgba(251, 191, 36, 0.3);
+  color: #fbbf24;
+}
+
+/* I know it — green */
+.vocab-card-btn-know {
+  border-color: rgba(34, 197, 94, 0.15);
+}
+.vocab-card-btn-know:hover {
+  background: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #22c55e;
+}
+
+/* Explain — purple/indigo */
+.vocab-card-btn-explain {
+  border-color: rgba(99, 102, 241, 0.15);
+}
+.vocab-card-btn-explain:hover {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: rgba(99, 102, 241, 0.35);
+  color: #818cf8;
+}
+
+/* ── Entrance: scale up from center-right with spring ──── */
+@keyframes vocab-card-enter {
+  0% {
+    opacity: 0;
+    transform: translateY(-50%) translateX(40px) scale(0.7);
+    filter: blur(6px);
+  }
+  50% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+/* ── Exit: shrink and slide out right ──────────────────── */
+@keyframes vocab-card-leave {
+  0% {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0) scale(1);
+    filter: blur(0);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-50%) translateX(60px) scale(0.85);
+    filter: blur(4px);
+  }
+}
+
+/* ── Flashcard Deck Panel ──────────────────────────────── */
+.flashcard-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 0.2s ease both;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.flashcard-panel {
+  width: 420px;
+  max-height: 80vh;
+  background: rgba(15, 20, 40, 0.95);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  border-radius: 24px;
+  padding: 24px;
+  overflow-y: auto;
+}
+
+.flashcard-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+.flashcard-panel-header h3 {
+  margin: 0;
+  font-size: 18px;
+  color: #e2e8f0;
+  font-weight: 600;
+}
+.flashcard-count {
+  font-size: 13px;
+  color: rgba(167, 139, 250, 0.7);
+  margin-left: auto;
+}
+.flashcard-close {
   background: none;
   border: none;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 22px;
   cursor: pointer;
-  font-size: 13px;
-  padding: 2px 4px;
-  border-radius: 4px;
-  transition: background 0.15s;
+  padding: 0 4px;
+  line-height: 1;
+}
+.flashcard-close:hover {
+  color: #fff;
 }
 
-.passive-suggestion-elaborate {
-  color: #a78bfa;
-}
-.passive-suggestion-elaborate:hover {
-  background: rgba(167, 139, 250, 0.15);
+.flashcard-empty {
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  padding: 40px 0;
+  font-size: 14px;
+  line-height: 1.8;
 }
 
-.passive-suggestion-close {
+.flashcard-card {
+  min-height: 200px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 16px;
+  padding: 24px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.flashcard-card:hover {
+  border-color: rgba(99, 102, 241, 0.3);
+}
+
+.flashcard-front {
+  text-align: center;
+}
+.flashcard-word {
+  font-size: 32px;
+  font-weight: 700;
+  color: #e2e8f0;
+  margin-bottom: 12px;
+}
+.flashcard-tap-hint {
+  font-size: 12px;
   color: rgba(255, 255, 255, 0.3);
-}
-.passive-suggestion-close:hover {
-  color: rgba(255, 255, 255, 0.7);
-  background: rgba(255, 255, 255, 0.05);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
 }
 
-@keyframes slide-up {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(-50%) translateY(0);
-  }
+.flashcard-back {
+  width: 100%;
+}
+.flashcard-hint {
+  font-size: 15px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  margin-bottom: 12px;
+}
+.flashcard-transcript {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.4);
+  border-left: 2px solid rgba(99, 102, 241, 0.3);
+  padding-left: 12px;
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.flashcard-replay-btn {
+  display: block;
+  width: 100%;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.1);
+  color: #a78bfa;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: 12px;
+}
+.flashcard-replay-btn:hover {
+  background: rgba(99, 102, 241, 0.2);
+  border-color: rgba(99, 102, 241, 0.4);
+}
+
+.flashcard-screenshot {
+  width: 100%;
+  border-radius: 8px;
+  margin-top: 8px;
+  opacity: 0.8;
+}
+
+.flashcard-nav {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.flashcard-nav button {
+  flex: 1;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.flashcard-nav button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.flashcard-nav button:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.flashcard-delete-btn {
+  border-color: rgba(239, 68, 68, 0.15) !important;
+  color: rgba(239, 68, 68, 0.7) !important;
+}
+.flashcard-delete-btn:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.1) !important;
+  color: #ef4444 !important;
 }

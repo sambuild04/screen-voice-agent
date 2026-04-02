@@ -17,6 +17,7 @@ interface TriageDecision {
 interface AudioCheckResult {
   transcript: string | null;
   hint: string | null;
+  clip_path: string | null;
 }
 
 export interface UseLearningModeReturn {
@@ -101,7 +102,7 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
         // Run audio and screen checks in parallel
         const [audioResult, screenHint] = await Promise.all([
           invoke<AudioCheckResult>("check_learning_audio", { language }).catch(
-            () => ({ transcript: null, hint: null }) as AudioCheckResult,
+            () => ({ transcript: null, hint: null, clip_path: null }) as AudioCheckResult,
           ),
           invoke<string | null>("check_screen_for_language", { language }).catch(
             () => null,
@@ -141,21 +142,20 @@ export function useLearningMode(sessionStatus: ConnectionStatus): UseLearningMod
           language,
         });
 
-        if (decision.classification === "act" && decision.confidence > 0.65) {
-          lastProactiveRef.current = Date.now();
-          const prefix =
-            bestSource === "audio"
-              ? `[System: Learning mode — overheard ${language} audio nearby.`
-              : `[System: Learning mode — spotted ${language} on the user's screen.`;
-          sendTextAndRespond(
-            `${prefix} Briefly and naturally mention this to the user (1-2 sentences): ${decision.message}]`,
-          );
-        } else if (decision.classification === "notify" && decision.confidence > 0.5) {
+        // All ambient observations go through the vocab card — Samuel never
+        // speaks unprompted about screen/audio content. The user taps "Explain"
+        // on the card if they want to hear it.
+        if (
+          (decision.classification === "act" && decision.confidence > 0.65) ||
+          (decision.classification === "notify" && decision.confidence > 0.5)
+        ) {
           lastProactiveRef.current = Date.now();
           setPassiveSuggestion({
             text: decision.message,
             source: bestSource,
             confidence: decision.confidence,
+            clipPath: audioResult.clip_path ?? undefined,
+            transcript: audioResult.transcript ?? undefined,
           });
         }
       } catch (e) {

@@ -8,6 +8,7 @@ import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
 import { PassiveSuggestion } from "./components/PassiveSuggestion";
+import { FlashcardDeck } from "./components/FlashcardDeck";
 
 export default function App() {
   const {
@@ -26,6 +27,7 @@ export default function App() {
   const record = useRecordMode();
   const learning = useLearningMode(status);
   const [awaitingWake, setAwaitingWake] = useState(true);
+  const [deckOpen, setDeckOpen] = useState(false);
 
   // Keep the session alive during recording and while viewing results
   // so the user can have a conversation about the clip
@@ -114,6 +116,17 @@ export default function App() {
             </div>
           )}
 
+          {/* Flashcard deck button — visible when learning mode is active */}
+          {learning.learningActive && (
+            <button
+              onClick={() => setDeckOpen(true)}
+              className="rounded-full p-2 bg-white/10 text-indigo-300 hover:text-indigo-200 transition-colors"
+              title="Scene Flashcards"
+            >
+              <DeckIcon />
+            </button>
+          )}
+
           {/* Full controls only when connected and active */}
           {status === "connected" && !awaitingWake && (
             <>
@@ -172,6 +185,8 @@ export default function App() {
         onDismiss={learning.dismissSuggestion}
         onElaborate={learning.elaborateSuggestion}
       />
+
+      <FlashcardDeck visible={deckOpen} onClose={() => setDeckOpen(false)} />
     </div>
   );
 }
@@ -226,6 +241,17 @@ function ProcessingIcon() {
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 2v4" /><path d="M12 18v4" /><path d="m4.93 4.93 2.83 2.83" /><path d="m16.24 16.24 2.83 2.83" />
       <path d="M2 12h4" /><path d="M18 12h4" /><path d="m4.93 19.07 2.83-2.83" /><path d="m16.24 7.76 2.83-2.83" />
+    </svg>
+  );
+}
+
+function DeckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="6" width="20" height="14" rx="2" />
+      <path d="M2 10h20" />
+      <path d="M6 2v4" />
+      <path d="M18 2v4" />
     </svg>
   );
 }

@@ -29,8 +29,8 @@ pub async fn transcribe_audio(audio_base64: String, extension: String) -> Result
         audio_bytes.len() as f64 / 1024.0
     );
 
-    // gpt-4o-mini-transcribe: higher quality than whisper-1, fewer
-    // hallucinations on silence, and supports instruction-like prompts.
+    // gpt-4o-mini-transcribe with a neutral prompt — avoid mentioning the
+    // wake phrase to prevent hallucination priming on ambient noise.
     let output = Command::new("curl")
         .args([
             "-s",
@@ -48,7 +48,7 @@ pub async fn transcribe_audio(audio_base64: String, extension: String) -> Result
             "-F",
             "language=en",
             "-F",
-            "prompt=The user is trying to say the wake phrase 'Hey Samuel' to activate a voice assistant. Transcribe exactly what they say. If the audio is silence or background noise, return an empty string.",
+            "prompt=Transcribe any English speech. If the audio is silence, noise, music, or non-English speech, return an empty string.",
         ])
         .output()
         .map_err(|e| format!("curl error: {e}"))?;

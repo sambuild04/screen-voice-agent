@@ -1,8 +1,10 @@
 mod commands;
+mod flashcards;
 mod memory;
 mod wake_word;
 
 use commands::*;
+use flashcards::*;
 use memory::*;
 use wake_word::*;
 use tauri::Manager;
@@ -13,6 +15,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             commands::cleanup_temp_files();
+            flashcards::cleanup();
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -71,6 +74,12 @@ pub fn run() {
             memory_get_context,
             memory_set_fact,
             memory_mark_known,
+            get_latest_screenshot_path,
+            get_flashcard_deck,
+            save_flashcard,
+            delete_flashcard,
+            read_flashcard_file,
+            increment_flashcard_review,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

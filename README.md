@@ -1,6 +1,6 @@
 # Samuel — AI That Watches Your Screen and Teaches You by Voice in Real Time
 
-> A real-time voice AI tutor that lives on your desktop. It sees your screen, hears your audio, and teaches you vocabulary, grammar, and pronunciation — out loud, by voice — while you watch anime, browse the web, or read a book. No typing. No flashcards. Just say "Hey Samuel."
+> A real-time voice AI tutor that lives on your desktop. It sees your screen, hears your audio, and teaches you vocabulary, grammar, and pronunciation — out loud, by voice — while you watch anime, browse the web, or read a book. Tap "Save it" and the actual scene clip becomes your flashcard. No typing. Just say "Hey Samuel."
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
@@ -8,7 +8,7 @@
 ![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
 ![Stars](https://img.shields.io/github/stars/sambuild04/reading-ai-agent?style=social)
 
-**Keywords:** AI language tutor, real-time voice teaching, learn Japanese while watching anime, AI desktop pet, ambient learning agent, OpenAI Realtime API voice agent, screen-aware AI, Tauri desktop app, voice-first AI assistant, learn languages from video
+**Keywords:** AI language tutor, real-time voice teaching, learn Japanese while watching anime, AI desktop pet, ambient learning agent, OpenAI Realtime API voice agent, screen-aware AI, Tauri desktop app, voice-first AI assistant, learn languages from video, anime flashcards, scene clip flashcards
 
 ---
 
@@ -56,6 +56,20 @@ All voice. All real time. Zero interruption to your workflow.
 
 See a word you don't understand? **Highlight it.** Say "what's this word?" Samuel reads your exact text selection from the clipboard — no guessing from screenshots — and teaches you the meaning, reading, and usage by voice.
 
+### Vocab Cards Pop Up — You Decide What Happens
+
+While you watch, a **frosted-glass vocab card** pops up with a word Samuel spotted — with a satisfying bubble pop sound. You get 60 seconds to choose:
+
+- **"Save it"** — saves the actual anime audio clip + screenshot as a **scene flashcard**
+- **"I know it"** — Samuel permanently stops teaching that word
+- **"Explain"** — Samuel speaks aloud and teaches it to you by voice
+
+No interruption. No pausing the video. The card appears beside Samuel and auto-dismisses if you ignore it.
+
+### Scene Clip Flashcards — Review With the Real Audio
+
+When you save a word, Samuel doesn't save text — he saves the **actual 20-second anime clip** where the word was spoken, plus a screenshot of that moment. Your flashcard deck isn't text cards — it's real scenes. You review vocabulary by **replaying the exact moment** you first heard the word, with the original voice actor's emotion and delivery. Open your deck anytime with the flashcard icon.
+
 ### He Remembers What You Know
 
 Tell Samuel "I already know that" and he **permanently** stops teaching that word. Tell him "I'm intermediate" and he skips beginner content. His memory persists across sessions — he adapts to your level over time.
@@ -70,6 +84,7 @@ Tell Samuel "I already know that" and he **permanently** stops teaching that wor
 | **Watches your screen** | No | No | **Yes — sees subtitles, web pages, books** |
 | **Listens to audio** | No | No | **Yes — hears video dialogue, podcasts** |
 | **Teaches from YOUR content** | No (app exercises) | Only if you paste it | **Automatic — whatever is on screen** |
+| **Scene clip flashcards** | Text cards only | No | **Saves the actual anime audio + screenshot** |
 | **Hands-free** | No | No | **Yes — "Hey Samuel" wake word** |
 | **Remembers your level** | Per-app only | Per-session | **Permanent adaptive memory** |
 | **Always available** | Must open app | Must open tab | **Floats on desktop 24/7** |
@@ -83,6 +98,20 @@ Tell Samuel "I already know that" and he **permanently** stops teaching that wor
 - **"Hey Samuel" wake word** — detected locally via Whisper. Always listening, like Siri
 - **Continuous perception loop** — every 20 seconds: captures screen (GPT-4o Vision) + transcribes system audio (ScreenCaptureKit) → triage engine decides whether to speak
 - **Silent context absorption** — even when Samuel doesn't speak, he's absorbing what's happening. Ask him about it anytime
+
+### Scene Clip Flashcards
+- Saves the **actual audio clip** (~20s of anime/video) when you tap "Save it"
+- Saves a **screenshot** of the scene alongside it
+- **Replay the exact moment** — hear the voice actor say the word with full emotion
+- Browse and review your deck anytime via the flashcard icon
+- Stored in `/tmp` — lightweight, auto-cleaned on app restart
+
+### Interactive Vocab Cards
+- **Frosted-glass popup** appears beside Samuel with a bubble pop sound
+- **60-second timer** with circular countdown — auto-dismisses if ignored
+- Three actions: "Save it" (flashcard), "I know it" (permanent suppression), "Explain" (Samuel speaks)
+- Spring entrance animation + blur transitions
+- Smart word extraction from hints (CJK, quoted text, bold markdown)
 
 ### Persistent Adaptive Memory
 - Tracks every word taught — 24-hour cooldown, no repeats
@@ -121,8 +150,9 @@ You speak → "Hey Samuel" wake word → OpenAI Realtime API → 12 tools → Vo
                                               ↕
                Always watching screen (GPT-4o Vision, change detection)
                Always listening to audio (ScreenCaptureKit, PID filtering)
-               Triage engine: ignore / hint card / speak aloud
+               Triage engine: ignore / vocab card / save flashcard
                Silent context injection — Samuel remembers everything
+               Scene clips saved → replay audio + screenshot in flashcard deck
 ```
 
 | What you say | What Samuel does |
@@ -138,6 +168,8 @@ You speak → "Hey Samuel" wake word → OpenAI Realtime API → 12 tools → Vo
 | "I'm learning Spanish" | Activates ambient voice teaching for Spanish |
 | "What did they just say?" | References ambient audio buffer to answer |
 | "I already know that" | Permanently suppresses that word |
+| *(tap "Save it" on vocab card)* | Saves scene audio clip + screenshot as flashcard |
+| *(tap flashcard icon)* | Opens deck — replay scene clips, review words |
 
 ### Models (6-model orchestration)
 
@@ -154,24 +186,27 @@ You speak → "Hey Samuel" wake word → OpenAI Realtime API → 12 tools → Vo
 src/                          React frontend (Vite + TypeScript)
 ├── hooks/
 │   ├── useRealtime.ts        Realtime voice: heartbeat, reconnect, context replay
-│   ├── useWakeWord.ts        "Hey Samuel" detection via Whisper
+│   ├── useWakeWord.ts        "Hey Samuel" fuzzy wake word via Whisper
 │   ├── useRecordMode.ts      System audio recording + analysis
 │   └── useLearningMode.ts    Ambient agent: parallel screen+audio, triage, silent context
 ├── lib/
 │   ├── samuel.ts             Agent: 12 consolidated tools, adaptive memory, voice persona
-│   └── session-bridge.ts     Bridges: image, silent context, recording, learning
+│   ├── session-bridge.ts     Bridges: image, silent context, recording, learning
+│   └── sounds.ts             Synthesized sound effects (chime, sleep, bubble pop)
 ├── components/
 │   ├── Character.tsx          Rive animation + manga speech bubbles
-│   └── PassiveSuggestion.tsx  Frosted-glass hint cards
-└── styles/app.css             Transparent window, animations
+│   ├── PassiveSuggestion.tsx  Vocab cards: 60s timer, save/know/explain, clip playback
+│   └── FlashcardDeck.tsx      Scene clip flashcard review panel
+└── styles/app.css             Transparent window, animations, vocab card, flashcard deck
 
 src-tauri/                    Rust backend (Tauri v2)
 ├── helpers/
 │   └── record-audio.swift    ScreenCaptureKit with PID-level process filtering
 └── src/
     ├── commands.rs           Screen capture, Vision, Computer Use, triage, audio, clipboard
+    ├── flashcards.rs         Scene clip flashcard persistence + audio/screenshot saving
     ├── memory.rs             Persistent adaptive memory: vocab, facts, proficiency
-    └── wake_word.rs          Whisper wake word with cross-clip matching
+    └── wake_word.rs          Whisper transcription (neutral prompt, no hallucination priming)
 ```
 
 ---
@@ -246,10 +281,12 @@ Say **"Hey Samuel"** and start learning.
 
 ## Roadmap
 
+- SRS scheduling for scene flashcards (spaced repetition on real anime clips)
+- Anki export from scene flashcard deck
+- Word-level timestamp trimming (isolate the exact 3s moment from the clip)
 - Local on-device wake word (zero-cost, instant activation)
 - Pre-routing classifier (GPT-4o-mini intent classification before tool selection)
 - Custom AI-generated companion characters via Rive
-- Anki flashcard export from learned vocabulary
 - iOS / Android companion app
 - Plugin system for custom tools and behaviors
 

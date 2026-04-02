@@ -39,6 +39,9 @@ struct ScreenState {
 }
 static SCREEN_STATE: Mutex<Option<ScreenState>> = Mutex::new(None);
 
+// Last captured screenshot path — used for flashcard snapshots
+static LATEST_SCREENSHOT: Mutex<Option<String>> = Mutex::new(None);
+
 // Apps where Samuel stays silent (deep focus)
 const FOCUS_APPS: &[&str] = &[
     "Cursor", "Code", "Xcode", "Terminal", "iTerm2",
@@ -1625,6 +1628,11 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
         return Ok(None);
     }
 
+    // Save screenshot for potential flashcard use
+    if let Some(path) = crate::flashcards::save_screenshot(b64) {
+        *LATEST_SCREENSHOT.lock().unwrap() = Some(path);
+    }
+
     // Screen change detection: hash the screenshot, compare with last state
     let current_hash = hash_bytes(b64.as_bytes());
     let current_app = get_frontmost_app_name();
@@ -1652,13 +1660,26 @@ pub async fn check_screen_for_language(language: String) -> Result<Option<String
 
     let prompt = format!(
         "Scan this screenshot for a {language} learner.\n\
+         CRITICAL RULE: You may ONLY pick words or text that are ACTUALLY VISIBLE on the screenshot. \
+         NEVER invent, infer, or suggest vocabulary that is not literally on screen.\n\n\
          PRIORITY 1: If you find {language} text (subtitles, UI, articles, chat), pick 1-2 interesting \
-         words or grammar patterns and explain them briefly (2-3 sentences, voice-friendly).\n\
-         PRIORITY 2: If there is NO {language} text but there IS interesting English (or other language) \
-         content — a concept, object, action, emotion, or topic visible on screen — teach how to say it \
-         in {language}. Frame it as: \"Do you know how to say [X] in {language}? It's [word/phrase] ([reading]).\"\n\
-         Pick something specific and visually prominent, not generic words like 'the' or 'button'.\n\
-         Only respond NONE if the screen is truly empty, a plain desktop, or has nothing teachable."
+         words or grammar patterns that are visible on screen and explain them briefly (2-3 sentences, voice-friendly).\n\
+         PRIORITY 2: If there is interesting English text or a clearly identifiable concept visible \
+         on screen, teach the {language} equivalent. Frame it as: \
+         \"Do you know how to say [X] in {language}? It's [word/phrase] ([reading]).\"\n\
+         IMPORTANT FILTERS:\n\
+         - ONLY reference text or objects that are ACTUALLY VISIBLE in the screenshot.\n\
+         - If the screen has Chinese/Korean/other non-{language} text, respond NONE. \
+         Do NOT use Chinese text as a springboard to teach random {language} vocabulary.\n\
+         - NEVER pick character names, proper nouns, or names of people/places \
+         (e.g. Gohan/悟飯, Vegeta/ベジータ, Goku/悟空, Naruto, 一ノ瀬, 堀北, etc.).\n\
+         - NEVER pick common loanwords the learner already knows from English \
+         (e.g. フィニッシュ/finish, テレビ/TV, スマートフォン/smartphone).\n\
+         - NEVER suggest generic vocabulary unrelated to the screen (e.g. \"Do you know how to say stairs/school/smartphone?\") \
+         when there is nothing on screen that prompted it.\n\
+         - Pick something specific, visually prominent, and genuinely useful.\n\
+         Respond NONE if: the screen is empty, a plain desktop, has only names, has only non-{language} text, \
+         or has nothing genuinely teachable."
     );
 
     let request_body = serde_json::json!({
@@ -1931,6 +1952,12 @@ pub struct TriageDecision {
 pub struct AudioCheckResult {
     pub transcript: Option<String>,
     pub hint: Option<String>,
+    pub clip_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_latest_screenshot_path() -> Option<String> {
+    LATEST_SCREENSHOT.lock().unwrap().clone()
 }
 
 /// Detect whether the user is in deep focus, casually available, or idle.
@@ -1994,6 +2021,9 @@ Rules:
 - If the observation mentions words listed in "User already knows (NEVER mention)", ALWAYS classify as ignore.
 - If the observation mentions words listed in "Recently taught (don't repeat today)", classify as ignore.
 - If memory shows a user proficiency level (e.g. "intermediate"), skip beginner-level content (basic greetings, numbers, common particles) and focus on content at or above their level.
+- ALWAYS ignore character names, proper nouns, and names of fictional or real people/places (e.g. 悟飯/Gohan, ベジータ/Vegeta, 悟空/Goku, ナルト/Naruto). These are NOT vocabulary.
+- ALWAYS ignore common English loanwords that are trivially obvious (e.g. フィニッシュ/finish, テレビ/TV) unless they have a genuinely non-obvious {language}-specific nuance.
+- ALWAYS ignore observations that look like Samuel's own speech echoed back (e.g. "means X in Japanese", "Understood, sir", "I'll keep that in mind").
 - Only "act" for truly specific, helpful observations."#
     );
 
@@ -2151,7 +2181,7 @@ pub async fn stop_learning_audio() -> Result<(), String> {
 /// Stop recorder, transcribe accumulated audio, restart recorder, return hints.
 #[tauri::command]
 pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, String> {
-    let empty = AudioCheckResult { transcript: None, hint: None };
+    let empty = AudioCheckResult { transcript: None, hint: None, clip_path: None };
 
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key")?;
@@ -2180,6 +2210,19 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
 
     eprintln!("[learning-audio] clip: {:.1}KB, transcribing...", size as f64 / 1024.0);
 
+    // Map learning language name to ISO 639-1 code for Whisper
+    let lang_code = match language.to_lowercase().as_str() {
+        "japanese" => "ja",
+        "chinese" | "mandarin" => "zh",
+        "korean" => "ko",
+        "spanish" => "es",
+        "french" => "fr",
+        "german" => "de",
+        "italian" => "it",
+        "portuguese" => "pt",
+        _ => "ja", // default to Japanese since that's the primary use case
+    };
+
     let whisper_output = Command::new("curl")
         .args([
             "-s",
@@ -2189,11 +2232,14 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
             "-H", &format!("Authorization: Bearer {api_key}"),
             "-F", &format!("file=@{LEARNING_AUDIO_PATH}"),
             "-F", "model=gpt-4o-mini-transcribe",
-            "-F", "prompt=Transcribe any speech. Ignore background music/SFX. If no speech, return empty.",
+            "-F", &format!("language={lang_code}"),
+            "-F", "prompt=Transcribe the speech accurately. Ignore background music and sound effects. If no speech, return empty.",
         ])
         .output()
         .map_err(|e| format!("curl: {e}"))?;
 
+    // Save clip to flashcards dir before deleting — we may need it for a flashcard
+    let saved_clip_path = crate::flashcards::save_audio_clip(LEARNING_AUDIO_PATH);
     let _ = fs::remove_file(LEARNING_AUDIO_PATH);
     // Restart recorder immediately so we don't miss audio
     let _ = start_learning_audio_internal();
@@ -2215,6 +2261,18 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         return Ok(empty);
     }
 
+    // Filter out Samuel's own TTS voice leaking back into the recorder
+    let lower = transcript.to_lowercase();
+    let self_talk_markers = [
+        "sir,", "sir.", "understood, sir", "in japanese that",
+        "in japanese it", "means '", "i'll keep that", "how may i assist",
+        "good evening", "shall i", "let me explain",
+    ];
+    if self_talk_markers.iter().any(|m| lower.contains(m)) {
+        eprintln!("[learning-audio] filtered self-talk: {}", truncate_str(&transcript, 80));
+        return Ok(empty);
+    }
+
     eprintln!("[learning-audio] transcript: {}", truncate_str(&transcript, 120));
 
     // Store raw transcript in memory so Samuel can reference it
@@ -2222,13 +2280,23 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
 
     let analysis_prompt = format!(
         "You heard the following audio transcript. Help a {language} learner.\n\
+         CRITICAL RULE: You may ONLY pick words or phrases that appear VERBATIM in the transcript below. \
+         NEVER infer, paraphrase, summarize, or suggest related concepts that are not explicitly present \
+         in the text. If the transcript says '成績', you may teach '成績' — but you must NOT invent \
+         '便利な成績確認ツール' or any phrase not actually spoken.\n\n\
          PRIORITY 1: If it contains {language} speech, pick 1-2 interesting words or grammar \
-         patterns and explain them briefly (2-3 sentences, voice-friendly).\n\
+         patterns that appear in the transcript and explain them briefly (2-3 sentences, voice-friendly).\n\
          PRIORITY 2: If the speech is in English (or another non-{language} language), find an \
-         interesting word, phrase, or concept mentioned and teach the {language} equivalent. \
+         interesting word or phrase that was actually said and teach the {language} equivalent. \
          Frame it as: \"I heard [X] — in {language} that's [word/phrase] ([reading]).\"\n\
-         Pick something specific and contextual, not trivial words.\n\
-         Only respond NONE if the transcript is just noise, music with no lyrics, or too short to be useful.\n\n\
+         IMPORTANT FILTERS:\n\
+         - ONLY use words/phrases that appear verbatim in the transcript. No paraphrasing.\n\
+         - NEVER pick character names, proper nouns, or names of people/places \
+         (e.g. Gohan, Vegeta, Goku, Naruto, 一ノ瀬, 堀北, 綾野 etc.). These are names, not vocabulary.\n\
+         - NEVER pick common loanwords that the learner already knows from English \
+         (e.g. フィニッシュ/finish, テレビ/TV, ペナルティ/penalty) unless they have a non-obvious nuance.\n\
+         - Pick something specific, contextual, and genuinely useful — not trivial.\n\
+         Only respond NONE if the transcript is just noise, music, names only, trivial loanwords, or too short to be useful.\n\n\
          Transcript: {transcript}"
     );
 
@@ -2259,8 +2327,11 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         .map_err(|e| format!("curl gpt: {e}"))?;
 
     if !gpt_output.status.success() {
-        // Still return the transcript even if hint analysis fails
-        return Ok(AudioCheckResult { transcript: Some(transcript), hint: None });
+        return Ok(AudioCheckResult {
+            transcript: Some(transcript),
+            hint: None,
+            clip_path: saved_clip_path,
+        });
     }
 
     let gpt_body: serde_json::Value =
@@ -2280,5 +2351,16 @@ pub async fn check_learning_audio(language: String) -> Result<AudioCheckResult, 
         Some(hint)
     };
 
-    Ok(AudioCheckResult { transcript: Some(transcript), hint: hint_val })
+    // If no useful hint, clean up the saved clip to avoid accumulating unused files
+    if hint_val.is_none() {
+        if let Some(ref p) = saved_clip_path {
+            let _ = fs::remove_file(p);
+        }
+    }
+
+    Ok(AudioCheckResult {
+        transcript: Some(transcript),
+        hint: hint_val,
+        clip_path: saved_clip_path,
+    })
 }
