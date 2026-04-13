@@ -9,8 +9,12 @@ interface Props {
   content: AnnotatedContent;
   selectedLine: number | null;
   onSelectLine: (idx: number | null) => void;
-  onAskSamuel: (question: string) => void;
   onClose: () => void;
+  /** Song teaching state */
+  isLessonActive?: boolean;
+  currentLessonLine?: number | null;
+  onStopLesson?: () => void;
+  onGoToLine?: (index: number) => void;
 }
 
 type Tab = "text" | "vocab" | "grammar";
@@ -19,20 +23,26 @@ export function TeachViewer({
   content,
   selectedLine,
   onSelectLine,
-  onAskSamuel,
   onClose,
+  isLessonActive,
+  currentLessonLine,
+  onStopLesson,
+  onGoToLine,
 }: Props) {
   const [tab, setTab] = useState<Tab>("text");
   const [tappedWord, setTappedWord] = useState<VocabAnnotation | null>(null);
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
-  // Scroll selected line into view
+  // Scroll selected or current lesson line into view
+  const scrollTarget = isLessonActive && currentLessonLine !== null && currentLessonLine !== undefined
+    ? currentLessonLine
+    : selectedLine;
   useEffect(() => {
-    if (selectedLine !== null) {
-      const el = lineRefs.current.get(selectedLine);
+    if (scrollTarget !== null) {
+      const el = lineRefs.current.get(scrollTarget);
       el?.scrollIntoView({ behavior: "smooth", block: "center" });
     }
-  }, [selectedLine]);
+  }, [scrollTarget]);
 
   const vocabByLine = new Map<number, VocabAnnotation[]>();
   for (const v of content.vocabulary) {
@@ -58,13 +68,6 @@ export function TeachViewer({
     setTappedWord(word);
   }
 
-  function handleExplainLine(idx: number) {
-    const line = content.lines[idx];
-    if (line) {
-      onAskSamuel(`Explain line ${idx + 1}: "${line.text}"`);
-    }
-  }
-
   const contentTypeLabel: Record<string, string> = {
     youtube: "YouTube",
     article: "Article",
@@ -72,8 +75,6 @@ export function TeachViewer({
     pdf: "PDF",
     raw_text: "Text",
   };
-
-  const videoId = (content as unknown as Record<string, unknown>).videoId as string | undefined;
 
   return (
     <div className="teach-overlay">
@@ -86,28 +87,21 @@ export function TeachViewer({
             </span>
             <h3 className="teach-title">{content.title ?? "Content"}</h3>
           </div>
-          <div className="teach-header-right">
-            <button
-              className="teach-ask-btn"
-              onClick={() => onAskSamuel("What's the hardest part of this content?")}
-            >
-              Ask Samuel
-            </button>
-            <button className="teach-close" onClick={onClose}>
-              ×
-            </button>
-          </div>
+          <button className="teach-close" onClick={onClose}>
+            ×
+          </button>
         </div>
 
-        {/* YouTube player embed */}
-        {videoId && (
-          <div className="teach-player">
-            <iframe
-              src={`https://www.youtube.com/embed/${videoId}?enablejsapi=1&rel=0`}
-              allow="autoplay; encrypted-media"
-              allowFullScreen
-              title="YouTube player"
-            />
+        {/* Active lesson indicator */}
+        {isLessonActive && (
+          <div className="teach-lesson-controls">
+            <div className="teach-lesson-active">
+              <span className="teach-lesson-playing-icon">♫</span>
+              <span className="teach-lesson-label">
+                Line {(currentLessonLine ?? 0) + 1} / {content.lines.length}
+              </span>
+              <button className="teach-lesson-btn teach-lesson-stop" onClick={onStopLesson}>Stop</button>
+            </div>
           </div>
         )}
 
@@ -147,6 +141,7 @@ export function TeachViewer({
                 const lineGrammar = grammarByLine.get(i);
                 const hasAnnotations = !!lineVocab || !!lineGrammar;
                 const isSelected = selectedLine === i;
+                const isCurrentLesson = isLessonActive && currentLessonLine === i;
 
                 return (
                   <div
@@ -154,8 +149,14 @@ export function TeachViewer({
                     ref={(el) => {
                       if (el) lineRefs.current.set(i, el);
                     }}
-                    className={`teach-line ${isSelected ? "teach-line-selected" : ""} ${hasAnnotations ? "teach-line-annotated" : ""}`}
-                    onClick={() => onSelectLine(isSelected ? null : i)}
+                    className={`teach-line ${isSelected ? "teach-line-selected" : ""} ${hasAnnotations ? "teach-line-annotated" : ""} ${isCurrentLesson ? "teach-line-playing" : ""}`}
+                    onClick={() => {
+                      if (isLessonActive && onGoToLine) {
+                        onGoToLine(i);
+                      } else {
+                        onSelectLine(isSelected ? null : i);
+                      }
+                    }}
                   >
                     <div className="teach-line-main">
                       {line.timestamp !== null && (
@@ -192,15 +193,6 @@ export function TeachViewer({
                             <span className="teach-ig-explanation">{g.explanation}</span>
                           </div>
                         ))}
-                        <button
-                          className="teach-explain-btn"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleExplainLine(i);
-                          }}
-                        >
-                          Ask Samuel about this line
-                        </button>
                       </div>
                     )}
                   </div>
@@ -215,10 +207,7 @@ export function TeachViewer({
                 <div
                   key={i}
                   className="teach-vocab-item"
-                  onClick={() => {
-                    setTab("text");
-                    onSelectLine(v.line_index);
-                  }}
+                  onClick={() => setTappedWord(v)}
                 >
                   <div className="teach-vocab-top">
                     <span className="teach-v-word">{v.word}</span>
@@ -240,10 +229,6 @@ export function TeachViewer({
                 <div
                   key={i}
                   className="teach-grammar-item"
-                  onClick={() => {
-                    setTab("text");
-                    onSelectLine(g.line_index);
-                  }}
                 >
                   <div className="teach-g-pattern">{g.pattern}</div>
                   <div className="teach-g-explanation">{g.explanation}</div>
@@ -259,7 +244,7 @@ export function TeachViewer({
           )}
         </div>
 
-        {/* Word popup */}
+        {/* Word popup — tap anywhere to dismiss */}
         {tappedWord && (
           <div className="teach-word-popup" onClick={() => setTappedWord(null)}>
             <div className="teach-wp-content" onClick={(e) => e.stopPropagation()}>
@@ -271,17 +256,9 @@ export function TeachViewer({
               {tappedWord.level && (
                 <div className="teach-wp-level">{tappedWord.level}</div>
               )}
-              <div className="teach-wp-actions">
-                <button
-                  onClick={() => {
-                    onAskSamuel(`Explain the word "${tappedWord.word}" in detail — usage, nuance, example sentences.`);
-                    setTappedWord(null);
-                  }}
-                >
-                  Ask Samuel
-                </button>
-                <button onClick={() => setTappedWord(null)}>Close</button>
-              </div>
+              <button className="teach-wp-close" onClick={() => setTappedWord(null)}>
+                ×
+              </button>
             </div>
           </div>
         )}
@@ -298,7 +275,6 @@ function highlightWords(
 ): React.ReactNode[] {
   if (vocab.length === 0) return [text];
 
-  // Build ranges of matches
   const matches: { start: number; end: number; vocab: VocabAnnotation }[] = [];
   for (const v of vocab) {
     let searchFrom = 0;
@@ -312,7 +288,6 @@ function highlightWords(
 
   if (matches.length === 0) return [text];
 
-  // Sort by position, deduplicate overlaps
   matches.sort((a, b) => a.start - b.start);
   const merged: typeof matches = [];
   for (const m of matches) {

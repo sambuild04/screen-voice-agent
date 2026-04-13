@@ -126,7 +126,7 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
       }
 
       while (active) {
-        const clipPromise = recordClip(stream, 3000);
+        const clipPromise = recordClip(stream, 2000);
 
         if (pendingTranscription) {
           try {
@@ -134,15 +134,15 @@ export function useWakeWord({ enabled, onDetected }: UseWakeWordOptions) {
             console.log(`[wake] whisper: "${text}"`);
 
             if (active && containsFullWakeWord(text)) {
-              if (await confirmWake(stream)) {
-                console.log("[wake] >>> DETECTED (full match, confirmed) <<<");
-                setState("detected");
-                onDetectedRef.current();
-                return;
-              }
+              // High-confidence: full "Hey Samuel" in one clip — skip confirmation
+              console.log("[wake] >>> DETECTED (full match, fast path) <<<");
+              setState("detected");
+              onDetectedRef.current();
+              return;
             }
 
             if (active && heardHey && Date.now() - heardHeyAt < 5000 && containsSamuelOnly(text)) {
+              // Cross-clip match is lower confidence — still confirm
               if (await confirmWake(stream)) {
                 console.log("[wake] >>> DETECTED (cross-clip, confirmed) <<<");
                 setState("detected");

@@ -2,10 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { RealtimeAgent, RealtimeSession } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
+import type { FunctionTool } from "@openai/agents/realtime";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
+
+/** Merge core + plugin tools, letting plugins override core tools by name. */
+function mergeTools(coreTools: FunctionTool[], pluginTools: FunctionTool[]): FunctionTool[] {
+  const pluginNames = new Set(pluginTools.map((t) => t.name));
+  const filtered = coreTools.filter((t) => !pluginNames.has(t.name));
+  return [...filtered, ...pluginTools];
+}
 
 export interface TranscriptEntry {
   id: string;
@@ -35,6 +43,7 @@ export interface UseRealtimeReturn {
   isMuted: boolean;
   setWakeWordMode: (on: boolean) => void;
   setSuppressIdle: (suppress: boolean) => void;
+  prefetchKey: () => void;
 }
 
 // Common hallucinations the transcriber produces from speaker echo / room reverb.
@@ -105,6 +114,9 @@ export function useRealtime(): UseRealtimeReturn {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isRotatingRef = useRef(false);
+
+  // Pre-fetched ephemeral key — start the API call before connect() to overlap latency
+  const prefetchedKeyRef = useRef<Promise<string> | null>(null);
 
   // Streaming assistant buffer
   const assistantBufferRef = useRef("");
@@ -439,15 +451,15 @@ export function useRealtime(): UseRealtimeReturn {
     const doReloadPlugins = async () => {
       try {
         const pluginTools = await loadAllPlugins();
-        const coreTools = samuelAgent.tools;
-        const merged = [...coreTools, ...pluginTools];
+        const coreTools = samuelAgent.tools as FunctionTool[];
+        const merged = mergeTools(coreTools, pluginTools);
         const updatedAgent = new RealtimeAgent({
           name: samuelAgent.name,
           instructions: samuelAgent.instructions as string,
           tools: merged,
         });
         await session.updateAgent(updatedAgent);
-        console.log(`[plugins] agent updated: ${coreTools.length} core + ${pluginTools.length} plugin tools`);
+        console.log(`[plugins] agent updated: ${merged.length} tools (${pluginTools.length} from plugins)`);
       } catch (err) {
         console.error("[plugins] reload failed:", err);
       }
@@ -532,6 +544,16 @@ export function useRealtime(): UseRealtimeReturn {
 
   const connectRef = useRef<(() => Promise<void>) | null>(null);
 
+  const prefetchKey = useCallback(() => {
+    if (!prefetchedKeyRef.current) {
+      console.log("[session] prefetching ephemeral key");
+      prefetchedKeyRef.current = invoke<string>("create_ephemeral_key").catch((err) => {
+        prefetchedKeyRef.current = null;
+        throw err;
+      });
+    }
+  }, []);
+
   const connect = useCallback(async () => {
     if (status === "connected" && !isRotatingRef.current) return;
     stopKeepalive();
@@ -549,7 +571,20 @@ export function useRealtime(): UseRealtimeReturn {
     }
 
     try {
-      const ephemeralKey = await invoke<string>("create_ephemeral_key");
+      // Use prefetched key if available, otherwise fetch with a 10s timeout
+      let keyPromise = prefetchedKeyRef.current || invoke<string>("create_ephemeral_key");
+      prefetchedKeyRef.current = null;
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Ephemeral key request timed out")), 10_000),
+      );
+      let ephemeralKey: string;
+      try {
+        ephemeralKey = await Promise.race([keyPromise, timeout]);
+      } catch (firstErr) {
+        console.warn("[session] first key attempt failed, retrying:", firstErr);
+        keyPromise = invoke<string>("create_ephemeral_key");
+        ephemeralKey = await Promise.race([keyPromise, timeout]);
+      }
       await session.connect({ apiKey: ephemeralKey });
 
       setStatus("connected");
@@ -603,18 +638,28 @@ export function useRealtime(): UseRealtimeReturn {
       if (session_) {
         loadAllPlugins().then((pluginTools) => {
           if (pluginTools.length > 0) {
-            const coreTools = samuelAgent.tools;
+            const coreTools = samuelAgent.tools as FunctionTool[];
+            const merged = mergeTools(coreTools, pluginTools);
             const updatedAgent = new RealtimeAgent({
               name: samuelAgent.name,
               instructions: samuelAgent.instructions as string,
-              tools: [...coreTools, ...pluginTools],
+              tools: merged,
             });
             session_.updateAgent(updatedAgent).then(() => {
-              console.log(`[plugins] loaded ${pluginTools.length} plugin(s) on connect`);
+              console.log(`[plugins] loaded ${pluginTools.length} plugin(s), ${merged.length} total tools`);
             }).catch((err) => console.error("[plugins] updateAgent failed:", err));
           }
         }).catch((err) => console.error("[plugins] load on connect failed:", err));
       }
+
+      // Auto-detect learning language from stored memory and silently activate
+      invoke<string>("memory_get_context").then((ctx) => {
+        const match = ctx.match(/proficiency:(\w+)/i);
+        if (match) {
+          console.log(`[session] auto-detected learning language: ${match[1]}`);
+          notifyLearningLanguage(match[1]);
+        }
+      }).catch(() => {});
 
       // Start heartbeat — keeps the Realtime API connection alive during silence
       heartbeatRef.current = setInterval(() => {
@@ -691,5 +736,6 @@ export function useRealtime(): UseRealtimeReturn {
     isMuted,
     setWakeWordMode,
     setSuppressIdle,
+    prefetchKey,
   };
 }

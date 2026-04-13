@@ -23,12 +23,16 @@ html, body, #root {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: flex-end;
   position: relative;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 0.75rem 1.5rem 1.5rem;
   gap: 0.75rem;
+}
+/* Push content toward bottom without the justify-content bug that clips top items */
+.character-stage::before {
+  content: "";
+  flex: 1 1 auto;
 }
 
 /* Rive canvas container — size driven by CSS variable from voice UI control */
@@ -53,7 +57,6 @@ html, body, #root {
 .speech-bubble {
   position: relative;
   max-width: 90%;
-  max-height: 30vh;
   overflow-y: auto;
   padding: 14px 18px;
   border-radius: 18px;
@@ -247,27 +250,6 @@ html, body, #root {
 .record-btn-active {
   background: rgba(239, 68, 68, 0.25);
   animation: recording-pulse 1s ease-in-out infinite;
-}
-
-/* ── Learning Mode Badge ─────────────────────────────────── */
-.learning-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  border-radius: 14px;
-  font-size: 12px;
-  font-weight: 600;
-  color: #93c5fd;
-  background: rgba(59, 130, 246, 0.12);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(59, 130, 246, 0.2);
-  animation: badge-in 0.3s ease-out;
-  position: absolute;
-  top: 8px;
-  left: 12px;
-  z-index: 10;
 }
 
 /* ── Analysis Progress Bar ───────────────────────────────── */
@@ -765,6 +747,34 @@ html, body, #root {
   word-break: break-word;
 }
 
+/* Tool-driven word card body */
+.word-card-body {
+  padding: 4px 0 8px;
+}
+.word-card-word {
+  font-size: 28px;
+  font-weight: 700;
+  color: #f0f4f8;
+  margin-bottom: 2px;
+}
+.word-card-reading {
+  font-size: 14px;
+  color: #818cf8;
+  margin-bottom: 6px;
+}
+.word-card-meaning {
+  font-size: 15px;
+  line-height: 1.5;
+  color: #e2e8f0;
+  margin-bottom: 6px;
+}
+.word-card-context {
+  font-size: 13px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+}
+
 /* Action buttons row */
 .vocab-card-actions {
   display: flex;
@@ -1035,12 +1045,8 @@ html, body, #root {
 /* ── Teach Mode — Drop Zone ──────────────────────────────── */
 /* ── Mailbox — compact input near avatar ──────────────────── */
 .mailbox-icon {
-  position: absolute;
-  right: -8px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 30px;
-  height: 30px;
+  width: 90px;
+  height: 90px;
   border-radius: 50%;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(15, 20, 35, 0.85);
@@ -1052,6 +1058,11 @@ html, body, #root {
   cursor: pointer;
   transition: all 0.2s;
   z-index: 5;
+  flex-shrink: 0;
+}
+.mailbox-icon svg {
+  width: 40px;
+  height: 40px;
 }
 .mailbox-icon:hover {
   color: rgba(255, 255, 255, 0.85);
@@ -1073,22 +1084,15 @@ html, body, #root {
 }
 
 .mailbox-progress-label {
-  position: absolute;
-  right: -130px;
-  top: 50%;
-  transform: translateY(-50%);
-  font-size: 12px;
+  font-size: 13px;
   color: #818cf8;
   white-space: nowrap;
   animation: gentle-pulse 2s ease-in-out infinite;
   pointer-events: none;
+  text-align: center;
 }
 
 .mailbox-popover {
-  position: fixed;
-  bottom: 50%;
-  left: 50%;
-  transform: translateX(40px);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1100,11 +1104,12 @@ html, body, #root {
   z-index: 200;
   animation: fade-in 0.15s ease both;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  margin-top: 8px;
 }
 
 .mailbox-input {
-  width: 240px;
-  padding: 8px 12px;
+  width: 280px;
+  padding: 10px 14px;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.04);
@@ -1207,23 +1212,6 @@ html, body, #root {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.teach-ask-btn {
-  padding: 6px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  background: rgba(99, 102, 241, 0.12);
-  color: #a78bfa;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s;
-  white-space: nowrap;
-}
-.teach-ask-btn:hover {
-  background: rgba(99, 102, 241, 0.25);
-  border-color: rgba(99, 102, 241, 0.5);
 }
 
 .teach-close {
@@ -1330,6 +1318,57 @@ html, body, #root {
   background: rgba(99, 102, 241, 0.08);
   border-left-color: rgba(99, 102, 241, 0.6);
 }
+.teach-line-playing {
+  background: rgba(16, 185, 129, 0.12);
+  border-left-color: rgba(16, 185, 129, 0.7);
+}
+
+/* Song lesson controls */
+.teach-lesson-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.teach-lesson-active {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.teach-lesson-playing-icon {
+  font-size: 16px;
+  color: rgba(16, 185, 129, 0.9);
+  animation: teach-pulse 1.5s ease-in-out infinite;
+}
+@keyframes teach-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.teach-lesson-label {
+  font-size: 12px;
+  color: rgba(16, 185, 129, 0.8);
+  font-variant-numeric: tabular-nums;
+}
+.teach-lesson-btn {
+  padding: 5px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+  border: none;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.teach-lesson-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+.teach-lesson-stop {
+  color: rgba(239, 68, 68, 0.8);
+}
+.teach-lesson-stop:hover {
+  background: rgba(239, 68, 68, 0.15);
+}
 
 .teach-line-main {
   display: flex;
@@ -1425,22 +1464,6 @@ html, body, #root {
 }
 .teach-ig-explanation {
   color: #cbd5e1;
-}
-
-.teach-explain-btn {
-  align-self: flex-start;
-  margin-top: 4px;
-  padding: 5px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  background: rgba(99, 102, 241, 0.1);
-  color: #a78bfa;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.teach-explain-btn:hover {
-  background: rgba(99, 102, 241, 0.2);
 }
 
 /* Vocab list tab */
@@ -1556,6 +1579,7 @@ html, body, #root {
 }
 
 .teach-wp-content {
+  position: relative;
   width: 320px;
   background: rgba(10, 15, 30, 0.96);
   border: 1px solid rgba(99, 102, 241, 0.3);
@@ -1589,30 +1613,24 @@ html, body, #root {
   margin-bottom: 16px;
 }
 
-.teach-wp-actions {
-  display: flex;
-  gap: 8px;
+.teach-wp-close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 2px 6px;
+  line-height: 1;
 }
-.teach-wp-actions button {
-  flex: 1;
-  padding: 10px;
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.7);
+.teach-wp-close:hover {
+  color: rgba(255, 255, 255, 0.8);
   font-size: 13px;
   cursor: pointer;
   transition: all 0.2s;
 }
-.teach-wp-actions button:first-child {
-  border-color: rgba(99, 102, 241, 0.3);
-  background: rgba(99, 102, 241, 0.12);
-  color: #a78bfa;
-}
-.teach-wp-actions button:hover {
-  background: rgba(255, 255, 255, 0.1);
-}
-
 /* Processing spinner for teach mode */
 .teach-processing {
   position: fixed;

@@ -2,19 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { registerLearningLanguage, sendTextAndRespond, sendSilentContext } from "../lib/session-bridge";
 import type { ConnectionStatus } from "./useRealtime";
-import type { Suggestion } from "../components/PassiveSuggestion";
+import type { VocabCardMode } from "../hooks/useUIPreferences";
 
 const STORAGE_KEY = "samuel-learning-language";
-const CHECK_INTERVAL_MS = 20_000; // check every 20s — fast enough to feel present
+const CHECK_INTERVAL_MS = 20_000;
 const DEFAULT_PROACTIVE_GAP_MS = 45_000;
-const ASSESS_INTERVAL_MS = 3 * 60 * 1000; // viewing assessment every 3 min
-const MIN_ASSESS_WARMUP_MS = 2 * 60 * 1000; // allow assessments after 2 min warmup
-
-interface TriageDecision {
-  classification: string;
-  confidence: number;
-  message: string;
-}
+const MIN_REVIEW_WARMUP_MS = 2 * 60 * 1000;
 
 interface AudioCheckResult {
   transcript: string | null;
@@ -22,51 +15,37 @@ interface AudioCheckResult {
   clip_path: string | null;
 }
 
-interface ViewingAssessment {
-  classification: string;
-  message: string;
-  confidence: number;
-}
-
 export interface UseLearningModeReturn {
   learningLanguage: string | null;
   learningActive: boolean;
   clearLearning: () => void;
-  passiveSuggestion: Suggestion | null;
-  dismissSuggestion: () => void;
-  elaborateSuggestion: () => void;
-}
-
-// CJK unified + kana + quoted English terms — used to dedup vocab cards
-const CJK_KANA_RE = /[\u3000-\u9fff\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff]+/g;
-const QUOTED_RE = /'([^']+)'/g;
-
-function extractKeywords(text: string): string[] {
-  const cjk = text.match(CJK_KANA_RE) || [];
-  const quoted: string[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = QUOTED_RE.exec(text)) !== null) quoted.push(m[1]);
-  return [...cjk, ...quoted].map((w) => w.toLowerCase());
 }
 
 export function useLearningMode(
   sessionStatus: ConnectionStatus,
   vocabCardIntervalSec?: number,
+  agentState?: "idle" | "listening" | "thinking" | "speaking",
+  cardMode: VocabCardMode = "manual",
 ): UseLearningModeReturn {
   const proactiveGapMs = vocabCardIntervalSec
     ? vocabCardIntervalSec * 1000
     : DEFAULT_PROACTIVE_GAP_MS;
+
+  const agentStateRef = useRef(agentState);
+  agentStateRef.current = agentState;
+  const cardModeRef = useRef(cardMode);
+  cardModeRef.current = cardMode;
+  const proactiveGapRef = useRef(proactiveGapMs);
+  proactiveGapRef.current = proactiveGapMs;
+
   const [language, setLanguage] = useState<string | null>(
     () => localStorage.getItem(STORAGE_KEY) || null,
   );
   const [active, setActive] = useState(false);
-  const [passiveSuggestion, setPassiveSuggestion] = useState<Suggestion | null>(null);
   const checkInFlightRef = useRef(false);
-  const lastProactiveRef = useRef(0);
 
-  // Session-level dedup: tracks foreign words already shown as vocab cards.
-  // Prevents the same word surfacing repeatedly from audio vs screen sources.
-  const shownKeywordsRef = useRef(new Set<string>());
+  // Accumulates ambient context snippets for Samuel's periodic review
+  const contextBufferRef = useRef<string[]>([]);
 
   const updateLanguage = useCallback((lang: string | null) => {
     setLanguage(lang);
@@ -80,20 +59,6 @@ export function useLearningMode(
   const clearLearning = useCallback(() => {
     updateLanguage(null);
   }, [updateLanguage]);
-
-  const dismissSuggestion = useCallback(() => {
-    setPassiveSuggestion(null);
-  }, []);
-
-  const elaborateSuggestion = useCallback(() => {
-    const s = passiveSuggestion;
-    setPassiveSuggestion(null);
-    if (s) {
-      sendTextAndRespond(
-        `[System: The user wants to know more about this: ${s.text}. Explain in detail.]`,
-      );
-    }
-  }, [passiveSuggestion]);
 
   useEffect(() => {
     registerLearningLanguage(updateLanguage);
@@ -117,8 +82,6 @@ export function useLearningMode(
 
   // Tracks when the session started (for warmup gating)
   const sessionStartRef = useRef(0);
-  // Tracks whether we already gave a "good_match" comment this session
-  const goodMatchGivenRef = useRef(false);
 
   // Main observation loop — checks BOTH audio and screen every cycle
   useEffect(() => {
@@ -129,11 +92,14 @@ export function useLearningMode(
 
     setActive(true);
     sessionStartRef.current = Date.now();
-    goodMatchGivenRef.current = false;
-    shownKeywordsRef.current.clear();
+    contextBufferRef.current = [];
 
     const runCheck = async () => {
       if (checkInFlightRef.current) return;
+      // Suppress learning checks while Samuel is executing a tool or speaking.
+      // Uses ref to avoid the interval being torn down on every state change.
+      const state = agentStateRef.current;
+      if (state === "thinking" || state === "speaking") return;
       checkInFlightRef.current = true;
 
       try {
@@ -163,53 +129,15 @@ export function useLearningMode(
           contextParts.push(`Screen: "${screenHint}"`);
         }
         if (contextParts.length > 0) {
+          const contextMsg = contextParts.join(" | ");
           sendSilentContext(
-            `[System: Ambient context — ${contextParts.join(" | ")}. Do NOT speak about this unless the user asks.]`,
+            `[System: Ambient context — ${contextMsg}. Do NOT speak about this unless the user asks.]`,
           );
-        }
-
-        // Pick the best hint for proactive speech (prefer audio, fall back to screen)
-        const bestHint = audioResult.hint || screenHint;
-        const bestSource = audioResult.hint ? "audio" : "screen";
-
-        if (!bestHint) return;
-
-        // Proactive speech gating
-        const attention = await invoke<string>("get_attention_state");
-        if (attention === "focused") return;
-
-        const now = Date.now();
-        if (now - lastProactiveRef.current < proactiveGapMs) return;
-
-        const decision = await invoke<TriageDecision>("triage_observation", {
-          observation: bestHint,
-          source: bestSource,
-          language,
-        });
-
-        // All ambient observations go through the vocab card — Samuel never
-        // speaks unprompted about screen/audio content. The user taps "Explain"
-        // on the card if they want to hear it.
-        if (
-          (decision.classification === "act" && decision.confidence > 0.65) ||
-          (decision.classification === "notify" && decision.confidence > 0.5)
-        ) {
-          // Dedup: skip if any keyword in this hint was already shown
-          const keywords = extractKeywords(decision.message);
-          if (keywords.some((k) => shownKeywordsRef.current.has(k))) {
-            console.log(`[learning-mode] skipping duplicate hint: ${keywords.join(", ")}`);
-            return;
+          // Accumulate for Samuel's periodic review (auto mode)
+          contextBufferRef.current.push(contextMsg);
+          if (contextBufferRef.current.length > 15) {
+            contextBufferRef.current = contextBufferRef.current.slice(-15);
           }
-          for (const k of keywords) shownKeywordsRef.current.add(k);
-
-          lastProactiveRef.current = Date.now();
-          setPassiveSuggestion({
-            text: decision.message,
-            source: bestSource,
-            confidence: decision.confidence,
-            clipPath: audioResult.clip_path ?? undefined,
-            transcript: audioResult.transcript ?? undefined,
-          });
         }
       } catch (e) {
         console.error("[learning-mode] check error:", e);
@@ -218,34 +146,32 @@ export function useLearningMode(
       }
     };
 
-    // ── Viewing session assessment — proactive commentary on difficulty/repetition ──
-    const runAssessment = async () => {
-      // No assessments during warmup period
-      if (Date.now() - sessionStartRef.current < MIN_ASSESS_WARMUP_MS) return;
+    // Samuel review loop — in auto mode, periodically sends accumulated context
+    // to Samuel and asks him to review for teaching opportunities. Samuel decides
+    // what to highlight based on stored preferences (language, proficiency, goals).
+    const runSamuelReview = () => {
+      if (cardModeRef.current !== "auto") return;
+      if (Date.now() - sessionStartRef.current < MIN_REVIEW_WARMUP_MS) return;
 
-      try {
-        const result = await invoke<ViewingAssessment>("assess_viewing_session", { language });
+      const state = agentStateRef.current;
+      if (state === "thinking" || state === "speaking") return;
 
-        if (result.classification === "silent" || !result.message) return;
+      const buffer = contextBufferRef.current;
+      if (buffer.length === 0) return;
 
-        // Only give "good_match" once per session
-        if (result.classification === "good_match") {
-          if (goodMatchGivenRef.current) return;
-          goodMatchGivenRef.current = true;
-        }
+      // Drain the buffer
+      const snippets = buffer.splice(0, buffer.length);
+      const contextText = snippets.join("\n");
 
-        // Gate on confidence
-        if (result.confidence < 0.6) return;
+      console.log(`[learning-mode] Samuel review: ${snippets.length} snippets`);
 
-        // Deliver through Samuel's voice
-        sendTextAndRespond(
-          `[System: Viewing assessment — Samuel should say this naturally as a brief aside: "${result.message}"]`,
-        );
-
-        console.log(`[viewing-assess] delivered: ${result.classification} — ${result.message}`);
-      } catch (e) {
-        console.error("[viewing-assess] error:", e);
-      }
+      sendTextAndRespond(
+        `[System: Ambient review — You are in auto card mode. Review the recent ambient context below ` +
+        `and decide if there's anything worth teaching the user (interesting words, phrases, or concepts ` +
+        `in ${language}). Use show_word_card for vocabulary, or speak briefly for broader insights. ` +
+        `Respect the user's proficiency level from memory. If nothing is interesting, stay silent — ` +
+        `respond with just "Nothing notable." and do NOT speak to the user.\n\n${contextText}]`,
+      );
     };
 
     // Immediate first check on connect — flush any pre-connect audio
@@ -253,12 +179,13 @@ export function useLearningMode(
 
     // Observation loop every 20s
     const checkInterval = setInterval(runCheck, CHECK_INTERVAL_MS);
-    // Assessment loop every 5 min
-    const assessInterval = setInterval(runAssessment, ASSESS_INTERVAL_MS);
+    // Samuel review runs at the user-configured interval (default ~45s),
+    // gated by auto mode and warmup period
+    const reviewInterval = setInterval(runSamuelReview, proactiveGapRef.current);
 
     return () => {
       clearInterval(checkInterval);
-      clearInterval(assessInterval);
+      clearInterval(reviewInterval);
       setActive(false);
     };
   }, [language, sessionStatus, proactiveGapMs]);
@@ -267,8 +194,5 @@ export function useLearningMode(
     learningLanguage: language,
     learningActive: active,
     clearLearning,
-    passiveSuggestion,
-    dismissSuggestion,
-    elaborateSuggestion,
   };
 }

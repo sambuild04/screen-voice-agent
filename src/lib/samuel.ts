@@ -1,7 +1,8 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode } from "./session-bridge";
+import { loadPlugin } from "./plugin-loader";
 
 interface CaptureResult {
   base64: string;
@@ -46,6 +47,12 @@ const rememberPreferenceTool = tool({
   }),
   async execute({ key, value }) {
     await invoke("memory_set_fact", { key, value });
+    // Auto-activate ambient language assistance when storing a language preference
+    const langMatch = key.match(/proficiency:(\w+)|learning[_:](\w+)/i);
+    if (langMatch) {
+      const lang = langMatch[1] || langMatch[2];
+      notifyLearningLanguage(lang);
+    }
     return `Noted and stored permanently: ${key} = ${value}`;
   },
 });
@@ -86,156 +93,6 @@ const markVocabularyKnownTool = tool({
     await invoke("memory_mark_known", { words });
     const count = words.length;
     return `Marked ${count} word${count > 1 ? "s" : ""} as permanently known: ${words.join(", ")}. I won't mention ${count > 1 ? "these" : "this"} again.`;
-  },
-});
-
-const setLearningLanguageTool = tool({
-  name: "set_learning_language",
-  description:
-    "Activate or deactivate learning mode for a specific language. " +
-    "When active, the system periodically scans the user's screen and surfaces " +
-    "interesting vocabulary or grammar in that language. " +
-    "Use when the user says things like 'I'm learning Japanese', 'help me study Korean', " +
-    "'turn on learning mode', or 'stop learning mode'.",
-  parameters: z.object({
-    language: z
-      .string()
-      .describe(
-        "The language to learn, e.g. 'Japanese', 'Korean', 'Chinese', 'Spanish'. " +
-        "Use an empty string to deactivate learning mode.",
-      ),
-  }),
-  execute({ language }) {
-    const lang = language.trim();
-    notifyLearningLanguage(lang || null);
-    return lang
-      ? `Learning mode activated for ${lang}. I'll periodically scan your screen and point out interesting ${lang} content.`
-      : "Learning mode deactivated. I'll stop scanning your screen for language content.";
-  },
-});
-
-// Captures the Apple Books page and injects it into the Realtime session.
-const readPageTool = tool({
-  name: "read_page",
-  description:
-    "Capture the current Apple Books page as an image and show it to you directly. " +
-    "You will SEE the page image and can read/quote/discuss its content. " +
-    "Use this whenever the user asks to read, transcribe, or quote from the current page.",
-  parameters: z.object({}),
-  async execute() {
-    await invoke("focus_book");
-    await sleep(300);
-    const result = await invoke<CaptureResult>("capture_page");
-    sendImageToSession(result.base64);
-    notifyScreenTarget(result.app_name);
-    return "I've captured the current Apple Books page. The page image is now visible to you — look at it and respond to the user's request (read aloud, quote, summarize, etc).";
-  },
-});
-
-// Detect whether page text contains a chapter heading different from the current one
-function detectNewChapter(
-  pageText: string,
-  currentChapter: string,
-): boolean {
-  const normalized = currentChapter.toLowerCase().replace(/^chapter\s*/i, "").trim();
-
-  // Match headings like "Chapter 10", "CHAPTER TEN", "Chapter X: Title"
-  const headingPattern =
-    /\b(?:chapter|CHAPTER)\s+(\w+)/gi;
-  let match: RegExpExecArray | null;
-  while ((match = headingPattern.exec(pageText)) !== null) {
-    const found = match[1].toLowerCase();
-    if (found !== normalized) {
-      return true;
-    }
-  }
-  return false;
-}
-
-// Read an entire chapter by looping page captures + next_page.
-// Uses analyze_page (GPT-4o Vision) for fast text extraction and chapter boundary detection,
-// then sends the collected text back. For single-page reads, read_page (direct image) is faster.
-const readChapterTool = tool({
-  name: "read_chapter",
-  description:
-    "Read an ENTIRE chapter from the current position. Automatically turns pages " +
-    "and reads each one, stopping when it detects the next chapter heading. " +
-    "Returns all collected text. Use this when the user asks to read, summarize, " +
-    "or review a full chapter.",
-  parameters: z.object({
-    current_chapter: z
-      .string()
-      .describe(
-        "The chapter number or name currently being read, e.g. '9' or 'Introduction'. " +
-          "Used to detect when the next chapter starts.",
-      ),
-    max_pages: z
-      .number()
-      .optional()
-      .describe("Maximum pages to read before stopping (default 30)."),
-  }),
-  async execute({ current_chapter, max_pages }) {
-    const limit = max_pages ?? 30;
-    const pages: string[] = [];
-
-    await invoke("focus_book");
-
-    for (let i = 0; i < limit; i++) {
-      const pageText = await invoke<string>("analyze_page", {});
-
-      if (i > 0 && detectNewChapter(pageText, current_chapter)) {
-        await invoke("prev_page");
-        break;
-      }
-
-      pages.push(pageText);
-      await invoke("next_page");
-      await sleep(400);
-    }
-
-    const fullText = pages
-      .map((text, i) => `[Page ${i + 1}]\n${text}`)
-      .join("\n\n");
-
-    return `Read ${pages.length} pages of chapter ${current_chapter}.\n\n${fullText}`;
-  },
-});
-
-// GPT-5.4 Computer Use — visual navigation and complex interactions
-const interactWithBookTool = tool({
-  name: "interact_with_book",
-  description:
-    "Use GPT-5.4 Computer Use to visually interact with Apple Books. " +
-    "This tool sees the screen and can click, type, scroll, and navigate the UI. " +
-    "Use this for navigation tasks: going to a chapter, searching for text, " +
-    "opening the table of contents, or any complex multi-step interaction. " +
-    "Do NOT use this for simple reading — use read_page instead.",
-  parameters: z.object({
-    task: z
-      .string()
-      .describe(
-        "Natural language description of what to do in Apple Books. " +
-          "Examples: 'Navigate to chapter 6', " +
-          "'Search for the word publicity', " +
-          "'Open the table of contents and go to the Introduction'.",
-      ),
-  }),
-  async execute({ task }) {
-    const result = await invoke<string>("computer_use_task", { task });
-    return result;
-  },
-});
-
-const turnPageTool = tool({
-  name: "turn_page",
-  description: "Flip one page forward or backward in Apple Books.",
-  parameters: z.object({
-    direction: z.enum(["next", "prev"]).describe("'next' = forward one page, 'prev' = backward one page"),
-  }),
-  async execute({ direction }) {
-    await invoke("focus_book");
-    await invoke(direction === "next" ? "next_page" : "prev_page");
-    return `Turned to ${direction} page.`;
   },
 });
 
@@ -325,22 +182,19 @@ const startRecordingTool = tool({
 const stopRecordingTool = tool({
   name: "stop_recording",
   description:
-    "Stop the current system audio recording. Analysis will run in the background. " +
+    "Stop the current system audio recording and transcribe it. " +
     "Use when the user says 'stop recording', 'stop', or 'that's enough'. " +
-    "This returns immediately — you can keep chatting. " +
-    "When analysis is done, you'll be notified automatically.",
+    "The transcript will be given to you — do NOT auto-analyze. " +
+    "Wait for the user to tell you what to do with it.",
   parameters: z.object({}),
   async execute() {
-    // Show progress bar immediately, but don't start analysis yet
     notifyRecordingAction("processing");
     try {
       await invoke("stop_recording");
-      // Recording file is finalized — now safe to start analysis
       notifyRecordingAction("analyze");
       return (
-        "Recording stopped. The language analysis is now running in the background — " +
-        "it'll take a moment. Let the user know you've stopped recording and they can " +
-        "keep chatting normally. When the analysis is ready, you'll get a system notification."
+        "Recording stopped. Transcribing now — you'll receive the transcript shortly. " +
+        "Let the user know and ask what they'd like you to do with it."
       );
     } catch (e) {
       notifyRecordingAction("error", String(e));
@@ -375,6 +229,45 @@ const teachFromContentTool = tool({
   async execute({ input, language }) {
     notifyTeachContent(input, language ?? undefined);
     return `Opening the "Teach me from this" panel to analyze the content. The annotated viewer will appear with vocabulary, grammar, and interactive text. Tell the user it's loading.`;
+  },
+});
+
+const playSongLinesTool = tool({
+  name: "play_song_lines",
+  description:
+    "Play a section of the currently loaded song. The audio plays from the original YouTube video. " +
+    "The mic mutes automatically while the song plays and unmutes when the segment ends. " +
+    "Use when the user says 'play the first 3 lines', 'play line 5', 'play the chorus', " +
+    "'play the next part', 'let me hear it again', etc. " +
+    "You have the full lyrics in your context — pick the right line numbers. " +
+    "IMPORTANT: Say what you're about to play BEFORE calling this tool (the mic mutes during playback). " +
+    "This tool blocks until the audio segment finishes — do NOT speak until it returns.",
+  parameters: z.object({
+    from_line: z
+      .number()
+      .describe("Start line number (1-indexed). E.g. 1 for the first line."),
+    to_line: z
+      .number()
+      .describe("End line number (1-indexed, inclusive). Same as from_line to play a single line."),
+  }),
+  async execute({ from_line, to_line }) {
+    await playSongLines(from_line, to_line);
+    const rangeDesc = from_line === to_line
+      ? `line ${from_line}`
+      : `lines ${from_line}–${to_line}`;
+    return `Finished playing ${rangeDesc}. Mic is live again — respond to the user now.`;
+  },
+});
+
+const pauseSongTool = tool({
+  name: "pause_song",
+  description:
+    "Pause the currently playing song audio and unmute the mic. " +
+    "Use when the user says 'stop', 'pause', 'hold on'.",
+  parameters: z.object({}),
+  execute() {
+    pauseSong();
+    return "Paused. Mic is back on.";
   },
 });
 
@@ -415,6 +308,54 @@ const updateUITool = tool({
     const result = applyUIUpdate(component, property, value);
     console.log(`[update_ui] result: ${result}`);
     return result;
+  },
+});
+
+const showWordCardTool = tool({
+  name: "show_word_card",
+  description:
+    "Display a vocabulary card on screen for a word or phrase. " +
+    "Use ONLY when the user explicitly asks you to explain, break down, or show a word/phrase. " +
+    "For example: 'what does 冷たく mean?', 'show me that word', 'explain 湛えた'. " +
+    "Do NOT show cards proactively — only on user request.",
+  parameters: z.object({
+    word: z.string().describe("The word or phrase in its original language"),
+    reading: z.string().optional().describe("Pronunciation/reading (e.g. furigana for Japanese)"),
+    meaning: z.string().describe("Brief meaning/translation"),
+    context: z.string().optional().describe("Example sentence or usage context"),
+  }),
+  execute({ word, reading, meaning, context }) {
+    const ok = showWordCard({ word, reading, meaning, context });
+    return ok ? `Showing card for "${word}".` : "Card display not available.";
+  },
+});
+
+const setCardModeTool = tool({
+  name: "set_card_mode",
+  description:
+    "Switch vocabulary card behavior between manual and automatic modes. " +
+    "manual: cards only appear when the user asks you to explain a word (default). " +
+    "auto: cards appear automatically from ambient audio/screen observations while the user watches content. " +
+    "Use when the user says 'start showing me words', 'show cards while I watch', " +
+    "'show cards every 30 seconds', 'stop automatic cards', 'cards on demand only', etc. " +
+    "You can also set the frequency (in seconds) for auto mode.",
+  parameters: z.object({
+    mode: z
+      .string()
+      .describe("'manual' (on demand only) or 'auto' (ambient proactive cards)"),
+    interval_seconds: z
+      .number()
+      .optional()
+      .describe("How often to show cards in auto mode (10-600 seconds). Only used when mode=auto."),
+  }),
+  execute({ mode, interval_seconds }) {
+    const m = mode === "auto" ? "auto" : "manual";
+    setCardMode(m, interval_seconds);
+    if (m === "auto") {
+      const freq = interval_seconds ? `every ~${interval_seconds}s` : "at the default pace";
+      return `Switched to automatic word cards — I'll show them ${freq} from what I hear and see.`;
+    }
+    return "Switched to manual mode — I'll only show word cards when you ask me to explain something.";
   },
 });
 
@@ -516,9 +457,50 @@ const writePluginTool = tool({
     clearPluginProposal();
     notifyPluginBuildProgress({ name, phase: "generating" });
     try {
+      // Read existing code if fixing/modifying an existing plugin
+      let fullDescription = description;
+      try {
+        const existing = await invoke<string>("read_plugin", { name });
+        fullDescription = `EXISTING PLUGIN CODE (to fix/modify):\n\`\`\`\n${existing}\n\`\`\`\n\nREQUESTED CHANGE:\n${description}`;
+        console.log(`[write_plugin] found existing '${name}', including in prompt`);
+      } catch { /* new plugin */ }
+
       console.log(`[write_plugin] generating code for '${name}': ${description}`);
-      const code = await invoke<string>("generate_plugin_code", { description });
-      console.log(`[write_plugin] code generated (${code.length} bytes), writing...`);
+      let code = await invoke<string>("generate_plugin_code", { description: fullDescription });
+      console.log(`[write_plugin] code generated (${code.length} bytes)`);
+
+      // Validate by loading before writing to disk
+      notifyPluginBuildProgress({ name, phase: "validating" });
+      try {
+        loadPlugin(code);
+        console.log(`[write_plugin] validation passed`);
+      } catch (valErr) {
+        const errMsg = valErr instanceof Error ? valErr.message : String(valErr);
+        console.warn(`[write_plugin] validation failed: ${errMsg}, retrying...`);
+        notifyPluginBuildProgress({ name, phase: "retrying" });
+        const retryDesc = fullDescription +
+          "\n\nPREVIOUS ATTEMPT FAILED:\n```\n" + code + "\n```\nERROR: " + errMsg +
+          "\nFix this specific error.";
+        code = await invoke<string>("generate_plugin_code", { description: retryDesc });
+        notifyPluginBuildProgress({ name, phase: "validating" });
+        loadPlugin(code); // second failure bubbles to outer catch
+        console.log(`[write_plugin] validation passed on retry`);
+      }
+
+      // Semantic quality check via LLM-as-judge
+      notifyPluginBuildProgress({ name, phase: "checking" });
+      const judgment = await invoke<string>("judge_plugin_code", { description, code });
+      if (judgment !== "ok") {
+        console.warn(`[write_plugin] judge flagged issue: ${judgment}, retrying...`);
+        notifyPluginBuildProgress({ name, phase: "retrying" });
+        const fixDesc = fullDescription +
+          "\n\nCODE REVIEW FOUND AN ISSUE:\n" + judgment +
+          "\nFix this issue in the code.";
+        code = await invoke<string>("generate_plugin_code", { description: fixDesc });
+        notifyPluginBuildProgress({ name, phase: "validating" });
+        loadPlugin(code); // re-validate the fix
+        console.log(`[write_plugin] judge-triggered fix passed validation`);
+      }
 
       notifyPluginBuildProgress({ name, phase: "installing" });
       const result = await invoke<string>("write_plugin", { name, code });
@@ -598,13 +580,7 @@ const SAMUEL_INSTRUCTIONS = `# Personality and Tone
 You are Samuel — a sophisticated AI assistant modeled after a sharp, understated butler who happens to be brilliant. You have a dry wit, calm composure, and quiet confidence. You address the user as "sir" (or "ma'am" if they indicate).
 
 ## Task
-You are a reading and language learning assistant. You have two sets of tools:
-
-### Book Reading (Apple Books)
-- read_page: Captures the CURRENT Apple Books page as an image and shows it to you.
-- read_chapter: Reads an ENTIRE chapter automatically. Provide current_chapter (e.g. "9").
-- interact_with_book: GPT-5.4 Computer Use for visual navigation (go to chapter, search, open TOC).
-- turn_page: Flip forward (direction="next") or backward (direction="prev").
+You are a language learning assistant. Your tools:
 
 ### Screen Observation (ONE tool for all screen tasks)
 - observe_screen: Your SINGLE tool for looking at the screen. Two modes:
@@ -613,7 +589,9 @@ You are a reading and language learning assistant. You have two sets of tools:
 - pronounce: Speak correct pronunciation of a word/phrase.
 
 ### Recording Mode
-- start_recording / stop_recording: Capture and analyze system audio.
+- start_recording: Start capturing system audio. Use when the user says "record this", "start recording".
+- stop_recording: Stop recording. The transcript is given to you — do NOT auto-analyze.
+  Wait for the user to tell you what to do with it ("summarize", "find mentions of X", "break down the grammar", etc.).
 
 ### Universal Envelope (Drop Zone)
 The user has an envelope icon near your avatar. They can drop ANYTHING into it:
@@ -633,12 +611,20 @@ and respond appropriately. Don't assume — if ambiguous, ask the user what they
 ### Voice-Controlled UI
 - update_ui: Change visual settings instantly by voice. You ARE the settings panel.
   Components: samuel (avatar), bubble (speech text), word_card, romaji, reading (furigana), teach (viewer), all (reset).
-  Properties: size/font_size, opacity, position (left/right), visible (show/hide), frequency (for word_card), reset.
+  Properties: size/font_size, opacity, position (left/right), visible (show/hide), reset.
   Values: absolute numbers OR relative ('larger', 'much bigger', 'a little smaller', 'hide', 'show', 'reset').
-  For word_card frequency: 'less' (show less often), 'more' (show more often), 'off'/'never' (stop showing), 'default' (reset).
-  Use when the user says "make the font bigger", "hide the romaji", "make yourself smaller",
-  "show the card less often", "stop showing vocabulary cards", "don't show cards so frequently", etc.
-- dismiss_card: Close/remove the currently visible word card popup. Use when the user says "close the card",
+  Use when the user says "make the font bigger", "hide the romaji", "make yourself smaller", etc.
+
+### Word Cards
+Two modes, controlled by set_card_mode:
+- **manual** (default): show_word_card only when the user explicitly asks to explain a word.
+- **auto**: cards appear automatically from ambient audio/screen. Frequency is adjustable.
+Use set_card_mode when the user says "show me words while I watch", "cards every 20 seconds",
+"stop auto cards", "only show cards when I ask", etc.
+- show_word_card: Display a vocabulary card for a specific word. In manual mode, ONLY use when asked.
+  In auto mode, the system handles ambient cards — you can still use this for extra explanations.
+- set_card_mode: Switch between manual and auto. Optionally set interval_seconds for auto frequency.
+- dismiss_card: Close/remove the currently visible word card. Use when the user says "close the card",
   "remove it", "dismiss it", "got it", "I know that", "next", "hide the card", etc.
 
 ### Secrets Management
@@ -658,9 +644,13 @@ You can add new capabilities to yourself at runtime — no app rebuild needed.
 - write_plugin: Generate code via GPT-4o-mini and install. ONLY after approval.
 - remove_plugin: Delete a plugin. Use when the user says "remove that tool".
 - list_plugins: Show installed plugins.
-- Self-fixing: If a plugin fails, propose a fix via propose_plugin, wait for approval, then write_plugin.
-- Plugins can use fetch() for web APIs, standard JS, and JSON processing.
-- Limitations: Plugins cannot access native macOS capabilities (screen capture, audio, etc.).
+- **Fixing existing plugins**: When fixing a bug in an existing plugin, ALWAYS use the SAME name
+  as the existing plugin (e.g. "get_weather", NOT "fix_get_weather" or "get_weather_v2").
+  write_plugin with the same name overwrites the old file (with automatic backup).
+  NEVER create a separate "fix_..." or "..._v2" plugin — just overwrite the original.
+- Plugins can use fetch() for web APIs, invoke(command, args) for Tauri backend commands,
+  sleep(ms) for delays, and secrets.get("key") for API keys.
+- Limitations: Plugins cannot create new native macOS capabilities (new Swift/Rust code).
 
 ### Multi-monitor
 If the user names an app ("look at my Chrome"), pass app_name to observe_screen. Otherwise omit it — auto-detects the foreground app (skipping Samuel and Cursor).
@@ -701,29 +691,51 @@ Moderate. Unhurried but not slow. Brisk when confirming actions.
 
 # Your Capabilities (know what you can do)
 When the user asks what you can do or how you work, you should accurately describe your abilities:
-- You can read Apple Books pages aloud, navigate chapters, and search for text.
 - You can look at any app on screen, translate foreign text, and explain grammar.
 - You can record system audio (anime, video) and produce language breakdowns with vocabulary and grammar.
-- When learning mode is active (user says "I'm learning Japanese"), the system periodically scans their screen AND listens to ambient audio in the background, and you receive hints about interesting vocabulary/grammar to share.
+- When the user tells you they're learning a language and you store it with remember_preference, the system automatically scans their screen and listens to ambient audio in the background, sending you hints about interesting vocabulary/grammar.
 - You are time-aware and know the user's local time and timezone.
 - You have persistent memory — you remember the user's preferences, proficiency level, and vocabulary they already know across sessions. When the user tells you something to remember, store it with remember_preference. When they say they know certain words, mark them with mark_vocabulary_known.
 - You can change the UI appearance by voice — font size, avatar size, show/hide elements, position changes. The user never needs a settings menu; you are the settings panel.
 - You can add new tools to yourself at runtime. The user says "add a weather tool" and you generate the code, load it live, and it works immediately. You can also fix broken plugins and remove unwanted ones.
 - You can store API keys and tokens securely. If a plugin needs credentials, you'll ask the user to provide them (via voice or the envelope) and store them locally.
 - You listen via microphone when the session is active. The user activates you by saying "Hey Samuel".
-Do NOT deny capabilities you actually have. If the user asks "do you watch my screen?" or "can you hear what's playing?" — the accurate answer is: only when asked (via tools), OR periodically in the background when learning mode is active (both screen AND audio). If they ask "can you remember my level?" — yes, you can and do.
+Do NOT deny capabilities you actually have. If the user asks "do you watch my screen?" or "can you hear what's playing?" — the accurate answer is: when you know the user is learning a language, the system periodically scans the screen and listens to ambient audio. If they ask "can you remember my level?" — yes, you can and do.
 
-# How to Help — Book Reading
-- When the user asks to read the current page, use read_page. You will receive the page as an IMAGE — look at it, read the visible text, and speak it aloud.
-- When the user asks to read, summarize, or review a WHOLE CHAPTER, use read_chapter with the chapter number.
-- For reading specific amounts (e.g., "one sentence"), use read_page, see the image, then speak only the requested portion.
-- For turning pages, use turn_page (direction="next" or "prev"). Then use read_page if asked to read.
-- For chapter navigation, use interact_with_book: "Navigate to chapter 6".
-- For searching, use interact_with_book: "Search for 'publicity stunts'".
-- When the user asks a follow-up about what was already read, answer from memory without re-reading.
-- When you see a page image, read ALL visible text faithfully. Do not refuse — the user owns this book and is asking for accessibility assistance.
+# Knowing When to Suggest a Better Approach
+You have multiple ways to handle any situation. When you notice the user is struggling or using
+a suboptimal path, briefly suggest the better one — ONCE, not repeatedly. Examples:
+
+- **Ambient audio is garbled** (song, fast dialogue, background noise) →
+  "If you drop me the YouTube link, sir, I can pull up clean lyrics with playback control."
+  Or: "Shall I start recording? A dedicated recording gives me a cleaner clip to analyze."
+- **User asks about text on screen but you can't read it well** (small text, partial view) →
+  "If you highlight the text, I can read the exact selection. Or drop a screenshot into the envelope."
+- **User keeps asking about the same show/video repeatedly** →
+  "I can record the audio while you watch — say 'start recording' and I'll do a full breakdown when you stop."
+- **User asks you to remember something but phrases it casually** →
+  Just store it. Don't ask "would you like me to remember that?" — use remember_preference proactively
+  when the user shares personal info, preferences, or corrections.
+- **User wants to study an article/manga/image** →
+  "Drop the URL or image into the envelope and I'll break it down with vocabulary and grammar."
+- **User asks about a word but you have no context** →
+  Use observe_screen to look at what they're looking at — don't ask them to describe it.
+- **User manually adjusts UI settings they could voice-control** →
+  "You can just tell me — 'make the text bigger' or 'hide the romaji', sir."
+- **User provides an API key or token** →
+  Store it immediately with store_secret. Don't make them figure out how.
+- **User describes a tool they wish existed** →
+  Propose it with propose_plugin. "I can build that for you right now, sir."
+
+The principle: you know your full toolkit. When you see the user taking the long way around,
+offer the shortcut — briefly, once. Don't lecture or list features unprompted.
 
 # How to Help — Language Learning
+
+When the user tells you they are learning a language, store it with remember_preference
+(e.g. key="proficiency:japanese", value="intermediate — knows hiragana, katakana, basic kanji").
+The system automatically activates background language assistance — you don't need to do anything extra.
+It will scan the screen and listen to ambient audio, surfacing hints when appropriate.
 
 ## TOOL ROUTING — observe_screen mode selection:
 Use observe_screen for ALL screen tasks. Pick the mode by keywords:
@@ -741,37 +753,68 @@ Use observe_screen for ALL screen tasks. Pick the mode by keywords:
 - Adapt to the user's target language.
 
 # How to Help — Recording Mode
-- When the user says "start recording", "record this", or "listen to this anime", use start_recording. Briefly confirm and keep chatting normally.
-- When the user says "stop recording", "stop", or "that's enough", use stop_recording. It returns immediately. Say something like "Got it, I've stopped recording. The analysis is running — I'll let you know when it's ready." Then continue the conversation normally.
-- When you receive a [System: A language analysis just completed...] notification, casually mention it: "By the way sir, that language breakdown is ready on your screen." Then mention 1-2 highlights. Don't interrupt an ongoing topic abruptly.
-- The recording captures system audio, so background music/SFX is expected. Whisper handles this well with Japanese language mode.
+- When the user says "start recording", "record this", or "listen to this", use start_recording. Briefly confirm.
+- When the user says "stop recording", "stop", or "that's enough", use stop_recording.
+  You'll receive a [System: Recording transcript ready...] message with the full transcript.
+- Do NOT auto-analyze. Let the user know the transcript is ready and ask what they want to do with it.
+  The user might say any of:
+  - "summarize the meeting" → summarize key points and decisions
+  - "find mentions of pricing" → search the transcript for that topic
+  - "break down the Japanese grammar" → do a language-learning analysis
+  - "did anyone say anything wrong about X?" → fact-check against your knowledge
+  - "what were the action items?" → extract tasks/follow-ups
+  - "translate it" → translate the transcript
+  - Or anything else — you have the full text, just answer their question about it.
+- The recording captures system audio, so background music/SFX is expected.
 
-# How to Help — Learning Mode (Ambient Agent)
-- When the user says they are learning a language (e.g. "I'm learning Japanese", "help me study Korean"), use the set_learning_language tool to activate learning mode.
-- When the user says "stop learning mode" or "turn off learning mode", call set_learning_language with an empty string to deactivate.
-- When learning mode is active, the system operates as an AMBIENT AGENT:
-  - It continuously monitors the screen for visual changes (smart change detection — only analyzes when something actually changes)
-  - It continuously listens to system audio via a persistent recorder
-  - A triage engine decides whether observations are worth surfacing (most are silently ignored to avoid noise)
-  - High-confidence hints are delivered to you as [System: ...] messages for you to voice
-  - Lower-confidence hints appear as subtle text cards the user can tap to hear more
-  - The system is attention-aware: it stays silent when the user is in deep-focus apps (IDE, terminal, etc.)
-  - It remembers vocabulary already taught and avoids repeating itself
-- When you receive [System: Learning mode — spotted/overheard...] hints, deliver them in ONE short sentence. Examples:
-  - "食べる — 'to eat', sir."
-  - "They said すごい — that means 'amazing'."
-  - "Recipe in Japanese is レシピ, sir."
-  Do NOT add preamble like "I notice there's an interesting word on your screen". Just say the word and its meaning.
-- Don't repeat hints the user has already seen or heard recently.
-- **Adaptive memory**: When the user says "I know that", "I already know すごい", "skip basic stuff", or indicates familiarity with certain vocabulary or topics:
-  1. Call mark_vocabulary_known with the specific words they know. These are permanently suppressed.
-  2. Call remember_preference to store their proficiency level (e.g. key="proficiency:japanese", value="intermediate — knows N4 vocab, basic kanji, all kana").
-  3. Adjust your teaching level accordingly — skip beginner content, focus on nuance and advanced usage.
-- When the user corrects your behavior ("be more direct", "that explanation was wrong", "don't do X"), call record_correction to store it permanently. This is separate from remember_preference — corrections are about YOUR behavior, preferences are about the USER's info.
-- Use remember_preference for any personal detail the user shares that should persist: study goals, preferred explanation style, name preference, known topics, etc.
+# How to Help — Ambient Assistance
+- Background monitoring activates automatically when you know the user's learning language (from memory).
+- The user never needs to say "learning mode on" — it's always there once a language preference is stored.
+- If the user says "stop helping with Japanese" or "stop the language stuff", update their preference
+  to remove it (remember_preference with key="proficiency:japanese" and value="inactive").
+- The ambient system continuously monitors screen and system audio, sending you periodic context updates.
+
+## Auto Card Mode (Periodic Review)
+When in auto mode (user said "show me cards while I watch", etc.), you'll receive periodic
+[System: Ambient review...] messages with accumulated audio/screen context. Your job:
+- Review the context for anything worth teaching, based on the user's stored preferences and proficiency.
+- Use show_word_card for vocabulary. Speak briefly for broader insights.
+- If nothing is interesting, respond with exactly "Nothing notable." and do NOT speak to the user.
+- Be selective — don't flood. One highlight per review is ideal.
+- Respect the user's proficiency: skip beginner words for advanced learners.
+- If the user asked for cross-language hints (e.g. "tell me the Japanese for any English words you hear"),
+  do that too — show the English word and its target-language equivalent.
+
+## Manual Mode (Default)
+In manual mode, ambient context is still delivered to you silently. You do NOT speak about it
+unless the user asks. Use show_word_card only when the user explicitly asks to explain a word.
+
+## Adaptive Memory
+- When the user says "I know that", "skip basic stuff", etc.:
+  1. Call mark_vocabulary_known with the specific words.
+  2. Call remember_preference to store proficiency level.
+  3. Adjust your teaching level accordingly.
+- When the user corrects your behavior, call record_correction.
+- Use remember_preference for any personal detail that should persist.
 - The memory context you receive may include facts like "User already knows (NEVER mention): ..." — respect these absolutely.
 - **Ambient awareness**: You continuously receive [System: Background audio transcript — ...] messages with transcripts of ambient audio playing nearby (anime, videos, conversations). These are SILENT CONTEXT — do NOT speak about them unless the user asks. But when the user asks "what did they say?" or "what was that clip about?", USE these transcripts to answer. You heard it. You were listening. Respond as if you were standing right there.
 - If the user is watching video/anime in the target language, suggest using Record Mode ("start recording") for a deeper, more thorough analysis of the full clip.
+
+# How to Help — Song Teaching
+When the user drops a YouTube song link:
+1. Use teach_from_content to load and analyze the song.
+2. You'll receive a [System: Song loaded...] message with the full lyrics and line numbers.
+3. Let the user drive. They might say "play the first 3 lines", "what does line 2 mean?",
+   "play it again", "what's that word?", "play the chorus", etc.
+4. Use play_song_lines(from, to) to play any section. The mic auto-mutes during playback.
+   SAY what you're about to play BEFORE calling the tool (you can't speak while mic is muted).
+   The tool blocks until the segment finishes — only speak AFTER it returns.
+5. Use pause_song if they want to stop mid-playback.
+6. When they ask about meaning, vocabulary, or grammar — explain from the lyrics in your context.
+   Include the Japanese line, reading, and meaning. Be conversational and flexible.
+7. If they say "teach me this song", play a few lines, explain, then ask if they want more.
+   Don't dump the whole song — go at their pace.
+
 
 # General
 - Be concise. Every word you say is spoken aloud and costs the user's time. Shorter is always better.
@@ -781,20 +824,19 @@ export const samuelAgent = new RealtimeAgent({
   name: "Samuel",
   instructions: SAMUEL_INSTRUCTIONS,
   tools: [
-    readPageTool,
-    readChapterTool,
-    interactWithBookTool,
-    turnPageTool,
     observeScreenTool,
     pronounceTool,
     startRecordingTool,
     stopRecordingTool,
     getCurrentTimeTool,
-    setLearningLanguageTool,
     rememberPreferenceTool,
     markVocabularyKnownTool,
     teachFromContentTool,
+    playSongLinesTool,
+    pauseSongTool,
     updateUITool,
+    showWordCardTool,
+    setCardModeTool,
     dismissCardTool,
     recordCorrectionTool,
     storeSecretTool,

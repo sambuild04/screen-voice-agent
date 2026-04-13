@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
 import type { TranscriptEntry } from "../hooks/useRealtime";
 import type { AnalysisStage, RecordingAnalysis, RecordingState } from "../hooks/useRecordMode";
@@ -19,10 +19,9 @@ interface CharacterProps {
   onDismissAnalysis: () => void;
   onTogglePanel: () => void;
   onClearAnalysis: () => void;
-  learningLanguage: string | null;
-  learningActive: boolean;
   teachState: string;
   onMailboxToggle: () => void;
+  envelopeSlot?: ReactNode;
 }
 
 const STATE_MACHINE = "State Machine 1";
@@ -47,10 +46,9 @@ export function Character({
   onDismissAnalysis,
   onTogglePanel,
   onClearAnalysis,
-  learningLanguage,
-  learningActive,
   teachState,
   onMailboxToggle,
+  envelopeSlot,
 }: CharacterProps) {
   const { rive, RiveComponent } = useRive({
     src: "/character.riv",
@@ -123,13 +121,6 @@ export function Character({
         </div>
       )}
 
-      {/* Learning mode indicator */}
-      {learningLanguage && learningActive && (
-        <div className="learning-badge">
-          <GraduationCapIcon /> Learning: {learningLanguage}
-        </div>
-      )}
-
       {/* Samuel's speech bubble — top right of character */}
       {(latestAssistant || showThinking) && (
         <div className="speech-bubble speech-bubble-samuel">
@@ -146,11 +137,13 @@ export function Character({
         </div>
       )}
 
-      {/* Rive character + mailbox anchor */}
-      <div style={{ position: "relative" }}>
-        <div className={`character-avatar ${agentState === "speaking" ? "character-glow" : ""}`}>
-          <RiveComponent />
-        </div>
+      {/* Rive character */}
+      <div className={`character-avatar ${agentState === "speaking" ? "character-glow" : ""}`}>
+        <RiveComponent />
+      </div>
+
+      {/* Envelope — centered below avatar */}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
         <button
           className={`mailbox-icon ${teachState === "input" ? "mailbox-open" : ""} ${teachState === "processing" ? "mailbox-busy" : ""}`}
           onClick={onMailboxToggle}
@@ -163,6 +156,7 @@ export function Character({
         {teachState === "error" && (
           <div className="mailbox-progress-label" style={{ color: "#f87171" }}>Failed — tap to retry</div>
         )}
+        {envelopeSlot}
       </div>
 
       {/* Screen target indicator */}
@@ -315,18 +309,9 @@ function EyeIcon() {
   );
 }
 
-function GraduationCapIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M22 10v6M2 10l10-5 10 5-10 5z" />
-      <path d="M6 12v5c3 3 9 3 12 0v-5" />
-    </svg>
-  );
-}
-
 function MailboxSvg() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="2" y="4" width="20" height="16" rx="2" />
       <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7" />
     </svg>
@@ -335,7 +320,7 @@ function MailboxSvg() {
 
 function MailboxSpinner() {
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="mailbox-spin">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="mailbox-spin">
       <path d="M12 2v4" /><path d="M12 18v4" />
       <path d="m4.93 4.93 2.83 2.83" /><path d="m16.24 16.24 2.83 2.83" />
       <path d="M2 12h4" /><path d="M18 12h4" />

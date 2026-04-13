@@ -10,6 +10,9 @@ import {
 
 const PHASE_LABELS: Record<string, string> = {
   generating: "Generating code…",
+  validating: "Validating…",
+  retrying: "Fixing issue, retrying…",
+  checking: "Quality check…",
   installing: "Installing plugin…",
   reloading: "Loading into session…",
   done: "Ready!",
@@ -65,10 +68,13 @@ export function PluginApproval() {
     const isDone = build.phase === "done";
     const isError = build.phase === "error";
     const progressPct =
-      build.phase === "generating" ? 33
-        : build.phase === "installing" ? 66
-          : build.phase === "reloading" ? 90
-            : 100;
+      build.phase === "generating" ? 20
+        : build.phase === "validating" ? 35
+          : build.phase === "retrying" ? 25
+            : build.phase === "checking" ? 50
+              : build.phase === "installing" ? 70
+                : build.phase === "reloading" ? 90
+                  : 100;
 
     return (
       <div className={`plugin-approval plugin-build ${isDone ? "plugin-build-done" : ""} ${isError ? "plugin-build-error" : ""}`}>

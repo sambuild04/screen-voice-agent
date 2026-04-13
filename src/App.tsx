@@ -5,17 +5,20 @@ import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
 import { useTeachMode } from "./hooks/useTeachMode";
+import { useAudioPlayer } from "./hooks/useAudioPlayer";
+import { useSongPlayback } from "./hooks/useSongTeaching";
 import { useUIPreferences } from "./hooks/useUIPreferences";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
-import { PassiveSuggestion } from "./components/PassiveSuggestion";
 import { FlashcardDeck } from "./components/FlashcardDeck";
+import { WordCard } from "./components/WordCard";
 import { TeachDrop } from "./components/TeachDrop";
 import { TeachViewer } from "./components/TeachViewer";
 import { PluginApproval } from "./components/PluginApproval";
-import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard } from "./lib/session-bridge";
+import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode } from "./lib/session-bridge";
+import type { WordCardData } from "./lib/session-bridge";
 
 export default function App() {
   const {
@@ -29,15 +32,38 @@ export default function App() {
     isMuted,
     setWakeWordMode,
     setSuppressIdle,
+    prefetchKey,
   } = useRealtime();
 
   const record = useRecordMode();
   const ui = useUIPreferences();
-  const learning = useLearningMode(status, ui.prefs.vocab_card_interval);
+  const learning = useLearningMode(status, ui.prefs.vocab_card_interval, agentState, ui.prefs.vocab_card_mode);
   const teachMode = useTeachMode();
+
+  // Latch song data so it survives teachMode.close() (which nulls content)
+  const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
+  const [songLines, setSongLines] = useState<import("./hooks/useTeachMode").ContentLine[] | null>(null);
+  const isSongContent = !!teachMode.content?.videoId;
+
+  useEffect(() => {
+    if (teachMode.content?.audio_file) {
+      setSongAudioPath(teachMode.content.audio_file);
+    }
+    if (teachMode.content?.videoId && teachMode.content.lines.length > 0) {
+      setSongLines(teachMode.content.lines);
+    }
+  }, [teachMode.content]);
+
+  const audioPlayer = useAudioPlayer(songAudioPath);
+  const songPlayback = useSongPlayback({
+    lines: songLines,
+    player: audioPlayer,
+  });
+
   const [awaitingWake, setAwaitingWake] = useState(true);
   const [deckOpen, setDeckOpen] = useState(false);
   const [envelopeOpen, setEnvelopeOpen] = useState(false);
+  const [wordCard, setWordCard] = useState<WordCardData | null>(null);
 
   // Register teach content bridge so Samuel's voice tool can trigger teach mode
   useEffect(() => {
@@ -55,14 +81,90 @@ export default function App() {
     return () => registerUIUpdate(null);
   }, [ui.applyUpdate]);
 
-  // Register dismiss-card bridge so Samuel can close vocab cards by voice
+  // Register dismiss-card bridge so Samuel can close word cards by voice
   useEffect(() => {
-    registerDismissCard(() => learning.dismissSuggestion());
+    registerDismissCard(() => setWordCard(null));
     return () => registerDismissCard(null);
-  }, [learning.dismissSuggestion]);
+  }, []);
+
+  // Register show-word-card bridge so Samuel can display word cards on demand
+  useEffect(() => {
+    registerShowWordCard((card) => setWordCard(card));
+    return () => registerShowWordCard(null);
+  }, []);
+
+  // Register card-mode bridge so Samuel can toggle manual ↔ auto by voice
+  useEffect(() => {
+    registerSetCardMode((mode, intervalSec) => {
+      ui.applyUpdate({ component: "word_card", property: "mode", value: mode });
+      if (intervalSec !== undefined) {
+        ui.applyUpdate({ component: "word_card", property: "frequency", value: String(intervalSec) });
+      }
+    });
+    return () => registerSetCardMode(null);
+  }, [ui.applyUpdate]);
+
+  // Register song playback bridge — mute mic during playback, unmute when done.
+  // Returns a promise so Samuel's tool waits until the segment finishes before speaking.
+  useEffect(() => {
+    registerSongPlayback(
+      (from, to) =>
+        new Promise<void>((resolve) => {
+          mute(true);
+          songPlayback.playLines(from, to, () => {
+            mute(false);
+            resolve();
+          });
+        }),
+      () => {
+        songPlayback.pause();
+        mute(false);
+      },
+    );
+    return () => registerSongPlayback(null, null);
+  }, [songPlayback.playLines, songPlayback.pause, mute]);
+
+  // When YouTube song lyrics load, inject them into Samuel's context (no panel)
+  const injectedSongRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      teachMode.state === "ready" &&
+      isSongContent &&
+      teachMode.content &&
+      injectedSongRef.current !== teachMode.content.videoId
+    ) {
+      injectedSongRef.current = teachMode.content.videoId!;
+      const hasSyncedTs = teachMode.content.synced;
+      const lyricsText = teachMode.content.lines
+        .map((l, i) => {
+          const ts = l.timestamp !== null
+            ? `[${Math.floor(l.timestamp / 60)}:${Math.floor(l.timestamp % 60).toString().padStart(2, "0")}]`
+            : "";
+          return `${i + 1} ${ts} ${l.text}`;
+        })
+        .join("\n");
+
+      const hasAudio = !!teachMode.content.audio_file;
+      const playbackNote = hasAudio
+        ? `Audio is loaded. Use play_song_lines(from, to) to play any section. ` +
+          (hasSyncedTs
+            ? "Lines have precise timestamps."
+            : "Lyrics are NOT time-synced — playback is approximate (~8s per line from start).") +
+          " The mic mutes automatically during playback and unmutes when the segment ends."
+        : "Audio is still downloading — play_song_lines will work once it finishes. " +
+          "You can explain the lyrics in the meantime.";
+
+      sendTextAndRespond(
+        `[System: Song loaded — "${teachMode.content.title ?? "Unknown"}". ` +
+        `${teachMode.content.lines.length} lines.\n${playbackNote}\n\n` +
+        `Lyrics:\n${lyricsText}\n\n` +
+        `Let the user know the song is ready and ask what they'd like to do.]`,
+      );
+      teachMode.close();
+    }
+  }, [teachMode.state, teachMode.content, isSongContent, teachMode.close]);
 
   // Keep the session alive during recording and while viewing results
-  // so the user can have a conversation about the clip
   useEffect(() => {
     const active = record.recordingState !== "idle";
     setSuppressIdle(active);
@@ -82,6 +184,7 @@ export default function App() {
     if (status === "connected") {
       mute(false);
     } else {
+      prefetchKey(); // start ephemeral key fetch immediately while connect() sets up
       connectingRef.current = true;
       try {
         await connect();
@@ -90,7 +193,7 @@ export default function App() {
         connectingRef.current = false;
       }
     }
-  }, [status, connect, mute, setWakeWordMode]);
+  }, [status, connect, mute, setWakeWordMode, prefetchKey]);
 
   // Run post-session feedback extraction when going to sleep (non-blocking)
   const extractFeedback = useCallback(() => {
@@ -162,8 +265,8 @@ export default function App() {
             </div>
           )}
 
-          {/* Flashcard deck button — visible when learning mode is active */}
-          {learning.learningActive && (
+          {/* Flashcard deck button */}
+          {status === "connected" && (
             <button
               onClick={() => setDeckOpen(true)}
               className="rounded-full p-2 bg-white/10 text-indigo-300 hover:text-indigo-200 transition-colors"
@@ -222,50 +325,38 @@ export default function App() {
         onDismissAnalysis={record.dismiss}
         onTogglePanel={record.togglePanel}
         onClearAnalysis={record.clearAnalysis}
-        learningLanguage={learning.learningLanguage}
-        learningActive={learning.learningActive}
         teachState={teachMode.state}
         onMailboxToggle={() => setEnvelopeOpen((o) => !o)}
+        envelopeSlot={
+          <TeachDrop
+            visible={envelopeOpen}
+            onToggle={() => setEnvelopeOpen(false)}
+            onDrop={(input) => {
+              setEnvelopeOpen(false);
+              sendTextAndRespond(
+                `[System: The user dropped content into the envelope: "${input}". ` +
+                `Identify what this is (YouTube link, article URL, API key/token, raw text, image, etc.) ` +
+                `and respond appropriately. If it's content to study, ask if they want you to teach from it ` +
+                `or use teach_from_content directly. If it looks like an API key or token, ask what it's for ` +
+                `so you can store it with store_secret. If it's something else, ask for context.]`,
+              );
+            }}
+          />
+        }
       />
 
-      {/* Suppress vocab cards while teach mode is active or Samuel is speaking */}
-      {(teachMode.state === "idle" || teachMode.state === "error") &&
-        agentState !== "speaking" && agentState !== "thinking" && (
-        <PassiveSuggestion
-          suggestion={learning.passiveSuggestion}
-          onDismiss={learning.dismissSuggestion}
-          onElaborate={learning.elaborateSuggestion}
-        />
-      )}
+      {/* Tool-driven word card — only shown when Samuel decides to */}
+      <WordCard card={wordCard} onDismiss={() => setWordCard(null)} />
 
       <FlashcardDeck visible={deckOpen} onClose={() => setDeckOpen(false)} />
 
-      <TeachDrop
-        visible={envelopeOpen}
-        onToggle={() => setEnvelopeOpen(false)}
-        onDrop={(input) => {
-          setEnvelopeOpen(false);
-          sendTextAndRespond(
-            `[System: The user dropped content into the envelope: "${input}". ` +
-            `Identify what this is (YouTube link, article URL, API key/token, raw text, image, etc.) ` +
-            `and respond appropriately. If it's content to study, ask if they want you to teach from it ` +
-            `or use teach_from_content directly. If it looks like an API key or token, ask what it's for ` +
-            `so you can store it with store_secret. If it's something else, ask for context.]`,
-          );
-        }}
-      />
 
-      {teachMode.state === "ready" && teachMode.content && (
+      {/* TeachViewer only for non-song content (articles, text, images) */}
+      {teachMode.state === "ready" && teachMode.content && !isSongContent && (
         <TeachViewer
           content={teachMode.content}
           selectedLine={teachMode.selectedLine}
           onSelectLine={teachMode.selectLine}
-          onAskSamuel={(q) => {
-            sendTextAndRespond(
-              `[System: The user is studying annotated content titled "${teachMode.content!.title}". ` +
-              `They asked: ${q}. Answer concisely based on the content.]`,
-            );
-          }}
           onClose={teachMode.close}
         />
       )}

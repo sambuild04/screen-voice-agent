@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { fetchLyricsForYouTube, type LyricsResult } from "../lib/lyrics";
+import { fetchLyricsForYouTube, extractVideoId, type LyricsResult } from "../lib/lyrics";
 
 export interface ContentLine {
   text: string;
@@ -32,6 +32,8 @@ export interface AnnotatedContent {
   summary: string | null;
   videoId?: string;
   synced?: boolean;
+  /** Local path to downloaded audio file (YouTube songs) */
+  audio_file?: string | null;
 }
 
 export type TeachState = "idle" | "input" | "processing" | "ready" | "error";
@@ -99,25 +101,37 @@ export function useTeachMode(): UseTeachModeReturn {
           // No lyrics found anywhere — fall back to backend yt-dlp+Whisper
           console.log("[teach] no lyrics found, falling back to Whisper");
           setProgress("Transcribing audio…");
+          const vid = extractVideoId(url);
           return invoke<AnnotatedContent>("teach_from_content", {
             input: url,
             language: language ?? null,
-          });
+          }).then((r) => ({
+            ...r,
+            videoId: vid ?? undefined,
+            // Whisper segmented transcription now returns timestamps
+            synced: r.lines.some((l) => l.timestamp !== null),
+          }));
         }
 
-        // Got lyrics — send to backend for annotation only
+        // Got lyrics — send to backend for annotation + download audio for playback
         console.log("[teach] got", result.lines.length, "lyric lines from", result.source);
         setProgress("Annotating…");
 
-        return invoke<AnnotatedContent>("annotate_lines", {
+        const annotatePromise = invoke<AnnotatedContent>("annotate_lines", {
           lines: result.lines,
           contentType: "youtube",
           title: result.title,
           language: language ?? null,
-        }).then((annotated) => ({
+        });
+        // Download audio in parallel (non-blocking — playback works once it finishes)
+        const audioPromise = invoke<string>("download_song_audio", { url })
+          .catch((e) => { console.warn("[teach] audio download failed:", e); return null; });
+
+        return Promise.all([annotatePromise, audioPromise]).then(([annotated, audioPath]) => ({
           ...annotated,
           videoId: result.videoId,
           synced: result.synced,
+          audio_file: audioPath,
         }));
       })
       .then((result) => {

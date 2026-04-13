@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "samuel-ui-prefs";
 
+export type VocabCardMode = "manual" | "auto";
+
 export interface UIPreferences {
   samuel_size: number;        // px, default 320
   samuel_opacity: number;     // 0-1, default 1
@@ -9,6 +11,7 @@ export interface UIPreferences {
   vocab_card_visible: boolean;
   vocab_card_position: "left" | "right";
   vocab_card_interval: number; // seconds between cards, default 45
+  vocab_card_mode: VocabCardMode; // manual = only on request, auto = ambient cards
   romaji_visible: boolean;
   reading_visible: boolean;   // furigana/pinyin
   teach_font_size: number;    // px, default 14
@@ -21,6 +24,7 @@ const DEFAULTS: UIPreferences = {
   vocab_card_visible: true,
   vocab_card_position: "right",
   vocab_card_interval: 45,
+  vocab_card_mode: "manual",
   romaji_visible: true,
   reading_visible: true,
   teach_font_size: 14,
@@ -130,6 +134,13 @@ export function useUIPreferences(): UseUIPreferencesReturn {
             const lower = value.toLowerCase();
             if (lower.includes("left")) next.vocab_card_position = "left";
             else if (lower.includes("right")) next.vocab_card_position = "right";
+          } else if (property === "mode") {
+            const lower = value.toLowerCase();
+            if (lower === "auto" || lower === "automatic" || lower === "proactive" || lower === "ambient") {
+              next.vocab_card_mode = "auto";
+            } else if (lower === "manual" || lower === "on_demand" || lower === "off" || lower === "stop") {
+              next.vocab_card_mode = "manual";
+            }
           } else if (property === "frequency" || property === "interval") {
             const lower = value.toLowerCase();
             if (lower.includes("less") || lower.includes("fewer") || lower.includes("rarely") || lower.includes("slow")) {
@@ -137,12 +148,15 @@ export function useUIPreferences(): UseUIPreferencesReturn {
             } else if (lower.includes("more") || lower.includes("often") || lower.includes("fast") || lower.includes("frequent")) {
               next.vocab_card_interval = Math.max(prev.vocab_card_interval - 30, 20);
             } else if (lower === "off" || lower === "never" || lower === "stop" || lower === "disable") {
-              next.vocab_card_visible = false;
+              next.vocab_card_mode = "manual";
             } else if (lower === "default" || lower === "reset" || lower === "normal") {
               next.vocab_card_interval = DEFAULTS.vocab_card_interval;
             } else {
               const num = parseInt(lower, 10);
-              if (!isNaN(num)) next.vocab_card_interval = clamp(num, 10, 600);
+              if (!isNaN(num)) {
+                next.vocab_card_interval = clamp(num, 10, 600);
+                next.vocab_card_mode = "auto";
+              }
             }
           }
         }

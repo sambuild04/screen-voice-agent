@@ -93,6 +93,8 @@ pub struct AnnotatedContent {
     pub vocabulary: Vec<VocabAnnotation>,
     pub grammar: Vec<GrammarAnnotation>,
     pub summary: Option<String>,
+    /// Local path to downloaded audio (YouTube songs only, kept for playback)
+    pub audio_file: Option<String>,
 }
 
 // ── Input classification ─────────────────────────────────────────────────────
@@ -144,9 +146,38 @@ fn find_yt_dlp() -> Result<String, String> {
     Err("yt-dlp not found — install with `brew install yt-dlp`".to_string())
 }
 
+/// Download audio from YouTube for playback (best-effort, returns None on failure).
+fn download_youtube_audio(yt_dlp: &str, url: &str) -> Option<String> {
+    let audio_file = "/tmp/samuel-teach-audio.m4a".to_string();
+    let _ = fs::remove_file(&audio_file);
+    eprintln!("[teach] youtube: downloading audio for playback...");
+    match run_with_timeout(
+        Command::new(yt_dlp).args([
+            "-x", "--audio-format", "m4a",
+            "--audio-quality", "5",
+            "--socket-timeout", "15",
+            "--no-warnings",
+            "-o", &audio_file,
+            url,
+        ]),
+        90,
+    ) {
+        Ok(dl) if dl.status.success() => {
+            let sz = fs::metadata(&audio_file).map(|m| m.len()).unwrap_or(0);
+            eprintln!("[teach] youtube: audio downloaded for playback ({sz} bytes)");
+            Some(audio_file)
+        }
+        _ => {
+            eprintln!("[teach] youtube: audio download for playback failed (non-fatal)");
+            None
+        }
+    }
+}
+
 // ── Extractors ───────────────────────────────────────────────────────────────
 
-fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String), String> {
+/// Returns (lines, title, audio_path_if_downloaded)
+fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String, Option<String>), String> {
     let yt_dlp = find_yt_dlp()?;
     eprintln!("[teach] youtube: using {yt_dlp}, fetching subtitles for {url}");
 
@@ -196,7 +227,9 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String), String> {
             }
             if !lines.is_empty() {
                 eprintln!("[teach] youtube: parsed {} subtitle lines", lines.len());
-                return Ok((lines, title));
+                // Subtitles found — still download audio for playback
+                let audio_path = download_youtube_audio(&yt_dlp, url);
+                return Ok((lines, title, audio_path));
             }
         }
     }
@@ -207,8 +240,8 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String), String> {
     }
 
     eprintln!("[teach] youtube: no subtitles found, downloading audio for transcription");
-    let audio_path = "/tmp/samuel-teach-audio.m4a";
-    let _ = fs::remove_file(audio_path);
+    let audio_file = "/tmp/samuel-teach-audio.m4a".to_string();
+    let _ = fs::remove_file(&audio_file);
 
     let dl = run_with_timeout(
         Command::new(&yt_dlp).args([
@@ -216,10 +249,10 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String), String> {
             "--audio-quality", "5",
             "--socket-timeout", "15",
             "--no-warnings",
-            "-o", audio_path,
+            "-o", &audio_file,
             url,
         ]),
-        90, // kill after 90s — audio download can be large
+        90,
     )
     .map_err(|e| format!("yt-dlp audio download failed: {e}"))?;
 
@@ -229,27 +262,16 @@ fn extract_youtube(url: &str) -> Result<(Vec<ContentLine>, String), String> {
         return Err(format!("yt-dlp download error: {err}"));
     }
 
-    let file_size = fs::metadata(audio_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = fs::metadata(&audio_file).map(|m| m.len()).unwrap_or(0);
     eprintln!("[teach] youtube: audio downloaded ({file_size} bytes), transcribing...");
 
     let config = read_config_internal()?;
     let api_key = config.api_key.ok_or("No API key")?;
-    let transcript = transcribe_file(audio_path, &api_key, "ja")?;
-    let _ = fs::remove_file(audio_path);
-    eprintln!("[teach] youtube: transcription done ({} chars)", transcript.len());
+    // Use segmented transcription to get individual lines with timestamps
+    let lines = transcribe_file_segmented(&audio_file, &api_key, "ja")?;
+    eprintln!("[teach] youtube: transcription done ({} segments)", lines.len());
 
-    let lines: Vec<ContentLine> = transcript
-        .split('\n')
-        .filter(|l| !l.trim().is_empty())
-        .enumerate()
-        .map(|(i, l)| ContentLine {
-            text: l.trim().to_string(),
-            timestamp: None,
-            source_index: i,
-        })
-        .collect();
-
-    Ok((lines, title))
+    Ok((lines, title, Some(audio_file)))
 }
 
 fn parse_vtt(vtt: &str) -> Vec<ContentLine> {
@@ -648,7 +670,87 @@ fn transcribe_file(path: &str, api_key: &str, lang: &str) -> Result<String, Stri
         .ok_or_else(|| format!("No text in transcription: {resp_str}"))
 }
 
+/// Transcribe with verbose_json to get timestamped segments (for songs).
+/// Uses whisper-1 because gpt-4o-mini-transcribe doesn't return segments.
+fn transcribe_file_segmented(path: &str, api_key: &str, lang: &str) -> Result<Vec<ContentLine>, String> {
+    eprintln!("[teach] running segmented transcription...");
+    let output = Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "--max-time", "120",
+            "-X", "POST",
+            "https://api.openai.com/v1/audio/transcriptions",
+            "-H", &format!("Authorization: Bearer {api_key}"),
+            "-F", &format!("file=@{path}"),
+            "-F", "model=whisper-1",
+            "-F", &format!("language={lang}"),
+            "-F", "response_format=verbose_json",
+        ])
+        .output()
+        .map_err(|e| {
+            eprintln!("[teach] segmented transcription curl failed: {e}");
+            format!("Whisper segmented call failed: {e}")
+        })?;
+
+    let resp_str = String::from_utf8_lossy(&output.stdout).to_string();
+    eprintln!("[teach] segmented transcription response: {} bytes", resp_str.len());
+
+    let resp: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| {
+            eprintln!("[teach] segmented transcription parse error: {e}");
+            eprintln!("[teach] raw response: {}", &resp_str[..resp_str.len().min(500)]);
+            format!("Parse segmented transcription: {e}")
+        })?;
+
+    if let Some(err) = resp.get("error") {
+        eprintln!("[teach] whisper error: {err}");
+        return Err(format!("Whisper error: {err}"));
+    }
+
+    let segments = resp["segments"]
+        .as_array()
+        .ok_or_else(|| {
+            eprintln!("[teach] no segments in response, keys: {:?}",
+                resp.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            format!("No segments in response")
+        })?;
+
+    let mut lines = Vec::new();
+    for (i, seg) in segments.iter().enumerate() {
+        let text = seg["text"].as_str().unwrap_or("").trim().to_string();
+        if text.is_empty() { continue; }
+
+        let start = seg["start"].as_f64();
+        lines.push(ContentLine {
+            text,
+            timestamp: start,
+            source_index: i,
+        });
+    }
+
+    eprintln!("[teach] segmented transcription: {} segments", lines.len());
+    Ok(lines)
+}
+
 // ── Main Tauri commands ──────────────────────────────────────────────────────
+
+/// Read an audio file from disk and return it as base64 (for frontend playback via blob URL).
+#[tauri::command]
+pub fn read_audio_base64(path: String) -> Result<String, String> {
+    let bytes = fs::read(&path).map_err(|e| format!("read audio: {e}"))?;
+    Ok(base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        &bytes,
+    ))
+}
+
+/// Download audio from a YouTube URL for playback. Returns the local file path.
+#[tauri::command]
+pub async fn download_song_audio(url: String) -> Result<String, String> {
+    let yt_dlp = find_yt_dlp()?;
+    download_youtube_audio(&yt_dlp, &url)
+        .ok_or_else(|| "Failed to download audio".to_string())
+}
 
 /// Annotate pre-fetched content (lyrics from LRCLIB, etc.) — no extraction step.
 #[tauri::command]
@@ -678,6 +780,7 @@ pub async fn annotate_lines(
         vocabulary,
         grammar,
         summary: Some(summary),
+        audio_file: None,
     })
 }
 
@@ -692,14 +795,12 @@ pub async fn teach_from_content(
 
     eprintln!("[teach] classified input as: {content_type}");
 
-    // YouTube is now handled in the frontend via LRCLIB; only fall back to
-    // yt-dlp+Whisper when the frontend explicitly sends "youtube_whisper".
-    let (lines, title) = match content_type {
+    let (lines, title, audio_file) = match content_type {
         "youtube" => extract_youtube(&input)?,
-        "article" => extract_article(&input)?,
-        "image" => extract_image(&input)?,
-        "pdf" => extract_pdf(&input)?,
-        _ => extract_raw_text(&input),
+        "article" => { let (l, t) = extract_article(&input)?; (l, t, None) }
+        "image" => { let (l, t) = extract_image(&input)?; (l, t, None) }
+        "pdf" => { let (l, t) = extract_pdf(&input)?; (l, t, None) }
+        _ => { let (l, t) = extract_raw_text(&input); (l, t, None) }
     };
 
     eprintln!("[teach] extracted {} lines, title: {:?}", lines.len(), &title);
@@ -722,5 +823,6 @@ pub async fn teach_from_content(
         vocabulary,
         grammar,
         summary: Some(summary),
+        audio_file,
     })
 }

@@ -4,8 +4,10 @@
  * executes them with new Function(), and wraps them as FunctionTool objects
  * compatible with the @openai/agents SDK.
  *
- * Plugins receive a `secrets` helper for accessing stored API keys:
+ * Injected helpers available to all plugins:
  *   secrets.get("key_name") → Promise<string | null>
+ *   invoke(command, args)   → Promise<unknown>  (Tauri backend commands)
+ *   sleep(ms)               → Promise<void>
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -29,15 +31,26 @@ const secretsHelper = {
   },
 };
 
+/** Invoke helper — gives plugins access to Tauri backend commands. */
+const invokeHelper = async (
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> => {
+  return invoke(command, args ?? {});
+};
+
+/** Sleep helper for timing delays. */
+const sleepHelper = (ms: number): Promise<void> =>
+  new Promise((r) => setTimeout(r, ms));
+
 /**
  * Execute a plugin code string via new Function() and validate the result.
- * Plugin code uses `return { ... }` and can reference `secrets` in execute().
+ * Plugin code uses `return { ... }` and can reference secrets, invoke, sleep.
  */
 export function loadPlugin(code: string): PluginDefinition {
-  // Pass `secrets` as a named parameter so plugins can call secrets.get()
   // eslint-disable-next-line no-new-func
-  const factory = new Function("secrets", code);
-  const def = factory(secretsHelper);
+  const factory = new Function("secrets", "invoke", "sleep", code);
+  const def = factory(secretsHelper, invokeHelper, sleepHelper);
 
   if (!def || typeof def !== "object") {
     throw new Error("Plugin did not return an object");
@@ -96,9 +109,12 @@ export function pluginToTool(def: PluginDefinition): FunctionTool {
   } as FunctionTool;
 }
 
+// Plugins can override any core tool by using the same name —
+// the mergeTools() helper in useRealtime handles deduplication.
+
 /**
  * Load all plugins from ~/.samuel/plugins/ and return them as FunctionTool[].
- * Skips plugins that fail to load/validate (logs errors).
+ * Skips plugins that fail to load/validate.
  */
 export async function loadAllPlugins(): Promise<FunctionTool[]> {
   const tools: FunctionTool[] = [];

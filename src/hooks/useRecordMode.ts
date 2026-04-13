@@ -79,46 +79,36 @@ export function useRecordMode() {
     }
   }, []);
 
-  // Run analysis in the background — doesn't block the conversation
-  const runAnalysisInBackground = useCallback(() => {
+  // Transcribe the recording in the background and give the raw transcript to Samuel.
+  // No auto-analysis — the user tells Samuel what to do with it.
+  const runTranscription = useCallback(() => {
     setAnalysisStage("transcribing");
     setAnalysisElapsed(0);
 
-    // Tick every second + estimate stage transitions:
-    // ~15s for Whisper transcription, then GPT-4o analysis kicks in
     analysisTimerRef.current = setInterval(() => {
-      setAnalysisElapsed((prev) => {
-        if (prev >= 14) setAnalysisStage("analyzing");
-        return prev + 1;
-      });
+      setAnalysisElapsed((prev) => prev + 1);
     }, 1000);
 
     (async () => {
       try {
-        const result = await invoke<RecordingAnalysis>("analyze_recording");
+        const transcript = await invoke<string>("transcribe_recording");
         clearAnalysisTimer();
         setAnalysisStage("done");
-        setAnalysis(result);
-        setState("results");
-        setPanelOpen(true);
+        setState("idle");
 
-        // Notify Samuel casually — conversation continues naturally
-        const transcriptText = result.transcript
-          .map((l) => `[${l.timestamp}] ${l.text}`)
-          .join("\n");
-        const vocabText = result.vocabulary
-          .map((v) => `${v.word} (${v.reading}) — ${v.meaning} [${v.level}]`)
-          .join("\n");
-        const grammarText = result.grammar
-          .map((g) => `${g.pattern}: ${g.explanation}`)
-          .join("\n");
+        if (!transcript.trim()) {
+          sendTextToSession(
+            "[System: Recording transcript ready — no speech was detected. Let the user know.]",
+          );
+          return;
+        }
 
         sendTextToSession(
-          "[System: A language analysis just completed in the background and is now visible on the user's screen. " +
-          "Casually let them know — something like 'By the way sir, the language breakdown from that clip is ready on screen.' " +
-          "Then briefly mention 1-2 highlights. Don't read the whole analysis. Keep it natural — the user may be mid-conversation about something else. " +
-          "Here is the full context for follow-up questions:]\n\n" +
-          `Summary: ${result.summary}\n\nTranscript:\n${transcriptText}\n\nVocabulary:\n${vocabText}\n\nGrammar:\n${grammarText}`
+          "[System: Recording transcript ready. The full transcript is below. " +
+          "Do NOT auto-analyze or summarize — let the user know the transcript is ready " +
+          "and wait for them to tell you what to do with it (summarize, find specific info, " +
+          "break down grammar, translate, fact-check, etc.).\n\n" +
+          `Transcript:\n${transcript}]`,
         );
       } catch (e) {
         clearAnalysisTimer();
@@ -136,13 +126,13 @@ export function useRecordMode() {
 
     try {
       await invoke("stop_recording");
-      // Analysis runs in background — conversation continues immediately
-      runAnalysisInBackground();
+      // Transcribe in background — Samuel waits for user to ask about it
+      runTranscription();
     } catch (e) {
       setError(String(e));
       setState("idle");
     }
-  }, [state, clearTimer, runAnalysisInBackground]);
+  }, [state, clearTimer, runTranscription]);
 
   const dismiss = useCallback(() => {
     setPanelOpen(false);
@@ -192,13 +182,12 @@ export function useRecordMode() {
           }, 1000);
           break;
         case "analyze":
-          // Recording file is finalized — safe to start analysis
-          runAnalysisInBackground();
+          // Recording file is finalized — safe to start transcription
+          runTranscription();
           break;
         case "results":
           setState("results");
           setAnalysis(payload as RecordingAnalysis);
-          setPanelOpen(true);
           break;
         case "error":
           clearTimer();

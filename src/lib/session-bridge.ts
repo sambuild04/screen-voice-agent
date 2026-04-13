@@ -126,6 +126,76 @@ export function notifyTeachContent(input: string, language?: string) {
 }
 
 // ---------------------------------------------------------------------------
+// Song Playback bridge
+// ---------------------------------------------------------------------------
+
+type PlaySongLinesFn = (fromLine: number, toLine: number) => Promise<void>;
+type PauseSongFn = () => void;
+let playSongLinesFn: PlaySongLinesFn | null = null;
+let pauseSongFn: PauseSongFn | null = null;
+
+export function registerSongPlayback(
+  play: PlaySongLinesFn | null,
+  pause: PauseSongFn | null,
+) {
+  playSongLinesFn = play;
+  pauseSongFn = pause;
+}
+
+/** Called by Samuel's play_song_lines tool. Lines are 1-indexed. Returns when segment ends. */
+export async function playSongLines(fromLine: number, toLine: number): Promise<void> {
+  await playSongLinesFn?.(fromLine, toLine);
+}
+
+/** Called by Samuel's pause_song tool. */
+export function pauseSong() {
+  pauseSongFn?.();
+}
+
+// ---------------------------------------------------------------------------
+// Show Word Card bridge (on-demand, tool-driven)
+// ---------------------------------------------------------------------------
+
+export interface WordCardData {
+  word: string;
+  reading?: string;
+  meaning: string;
+  context?: string;
+}
+
+type ShowWordCardFn = (card: WordCardData) => void;
+let showWordCardFn: ShowWordCardFn | null = null;
+
+export function registerShowWordCard(fn: ShowWordCardFn | null) {
+  showWordCardFn = fn;
+}
+
+/** Called by Samuel's show_word_card tool to display a vocab card on demand. */
+export function showWordCard(card: WordCardData): boolean {
+  if (!showWordCardFn) return false;
+  showWordCardFn(card);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Vocab Card Mode bridge (manual ↔ auto)
+// ---------------------------------------------------------------------------
+
+export type VocabCardMode = "manual" | "auto";
+
+type SetCardModeFn = (mode: VocabCardMode, intervalSec?: number) => void;
+let setCardModeFn: SetCardModeFn | null = null;
+
+export function registerSetCardMode(fn: SetCardModeFn | null) {
+  setCardModeFn = fn;
+}
+
+/** Called by Samuel to switch between manual and auto vocab card modes. */
+export function setCardMode(mode: VocabCardMode, intervalSec?: number) {
+  setCardModeFn?.(mode, intervalSec);
+}
+
+// ---------------------------------------------------------------------------
 // UI Update bridge
 // ---------------------------------------------------------------------------
 
@@ -187,7 +257,7 @@ export interface PluginProposal {
   summary: string;
 }
 
-export type PluginBuildPhase = "generating" | "installing" | "reloading" | "done" | "error";
+export type PluginBuildPhase = "generating" | "validating" | "retrying" | "checking" | "installing" | "reloading" | "done" | "error";
 
 export interface PluginBuildProgress {
   name: string;
