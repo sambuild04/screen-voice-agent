@@ -467,12 +467,6 @@ npm run tauri:dev
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, code style, and PR process.
 
-### Community
-
-- [Issues](https://github.com/sambuild04/screen-voice-agent/issues) — bug reports and feature requests
-- [Discussions](https://github.com/sambuild04/screen-voice-agent/discussions) — ideas, questions, show-and-tell
-- [Sam on X](https://x.com/sambuild04) — follow for updates
-
 ### Contributors
 
 Thanks to everyone who's helped:
@@ -489,8 +483,4 @@ MIT
 
 ---
 
-## Why I'm building this
-
-I wanted an AI that lives where I actually work — not a chatbot in another tab. Something that sees my screen, hears what I hear, learns what I'm trying to do, and gets better at helping me over time. After a year of building, here it is. It's still early. If any of this resonates, I'd love your help making it real.
-
-— [Sam Feng](https://github.com/sambuild04) · [DM me on X](https://x.com/sambuild04)
+**Built by [Sam Feng](https://github.com/sambuild04)**
