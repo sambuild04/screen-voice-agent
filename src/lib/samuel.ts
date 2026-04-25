@@ -488,6 +488,81 @@ const updateUITool = tool({
   },
 });
 
+// ---------------------------------------------------------------------------
+// Show content in a floating panel — no plugin needed
+// ---------------------------------------------------------------------------
+
+const showContentTool = tool({
+  name: "show_content",
+  description:
+    "Display content in a floating panel window. Use when the user says 'show me', " +
+    "'display this', 'put it in a window', 'show results'. Creates a visual overlay.\n" +
+    "Actions:\n" +
+    "- 'show': Display HTML content in a named panel. Supports markdown-like formatting.\n" +
+    "- 'hide': Remove a panel by ID.\n" +
+    "- 'hide_all': Remove all panels.\n\n" +
+    "For search results, format as a clean list with titles and snippets.\n" +
+    "For any content, use simple semantic HTML (h3, p, ul, li, a, strong, em).\n" +
+    "The panel automatically gets the dark glass theme matching the app.",
+  parameters: z.object({
+    action: z.enum(["show", "hide", "hide_all"]).describe("show=display content, hide=remove panel, hide_all=remove all"),
+    id: z.string().optional().describe("Panel ID (e.g. 'search-results', 'email-summary'). Required for show/hide."),
+    title: z.string().optional().describe("Panel title shown at the top. Required for show."),
+    content: z.string().optional().describe("HTML content to display. Use semantic HTML: h3, p, ul, li, a, strong, em. Required for show."),
+    position: z.string().optional().describe("'right' (default), 'left', 'center', 'bottom'"),
+    width: z.string().optional().describe("Panel width (e.g. '300px', '400px'). Default '320px'."),
+  }),
+  execute({ action, id, title, content, position, width }) {
+    if (action === "hide_all") {
+      document.querySelectorAll("[id^='samuel-panel-']").forEach((el) => el.remove());
+      logAction("show_content", {}, true, "All panels hidden", "hide_all");
+      return toolOk("All panels hidden.");
+    }
+
+    if (action === "hide") {
+      if (!id) return toolErr("invalid_input", "Need panel ID for hide.");
+      const el = document.getElementById(`samuel-panel-${id}`);
+      if (el) el.remove();
+      logAction("show_content", { id }, true, "Panel hidden", "hide");
+      return toolOk(`Panel "${id}" hidden.`);
+    }
+
+    // show
+    if (!id || !content) return toolErr("invalid_input", "Need id and content for show.");
+
+    let panel = document.getElementById(`samuel-panel-${id}`);
+    if (!panel) {
+      panel = document.createElement("div");
+      panel.id = `samuel-panel-${id}`;
+      panel.style.cssText = `
+        position: fixed; z-index: 200; pointer-events: auto;
+        background: rgba(10, 14, 30, 0.9); backdrop-filter: blur(20px);
+        -webkit-backdrop-filter: blur(20px);
+        border: 1px solid rgba(99, 102, 241, 0.25); border-radius: 14px;
+        padding: 16px; color: #e2e8f0; font-size: 13px; line-height: 1.5;
+        box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        animation: lyrics-hud-in 0.3s ease both;
+        overflow-y: auto; max-height: 80vh;
+      `;
+      const pos = position ?? "right";
+      if (pos === "right") { panel.style.right = "16px"; panel.style.top = "60px"; }
+      else if (pos === "left") { panel.style.left = "16px"; panel.style.top = "60px"; }
+      else if (pos === "center") { panel.style.left = "50%"; panel.style.top = "50%"; panel.style.transform = "translate(-50%, -50%)"; }
+      else if (pos === "bottom") { panel.style.bottom = "60px"; panel.style.left = "16px"; panel.style.right = "16px"; }
+      panel.style.width = width ?? "320px";
+      document.body.appendChild(panel);
+    }
+
+    const titleHtml = title ? `<div style="font-size:15px;font-weight:600;margin-bottom:10px;color:#a5b4fc">${title}</div>` : "";
+    const closeBtn = `<div style="position:absolute;top:8px;right:12px;cursor:pointer;color:#64748b;font-size:18px" onclick="this.parentElement.remove()">×</div>`;
+    panel.style.position = "fixed";
+    panel.innerHTML = closeBtn + titleHtml + `<div style="color:#cbd5e1">${content}</div>`;
+
+    logAction("show_content", { id, position }, true, `Panel "${id}" shown`, "show");
+    return toolOk(`Showing "${title ?? id}" panel.`);
+  },
+});
+
 const queryUIStateTool = tool({
   name: "query_ui_state",
   description:
@@ -1044,6 +1119,76 @@ const browserUseTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Computer Use — GPT-5.5 visual agent that can see + operate the browser
+// ---------------------------------------------------------------------------
+
+interface CuaResult {
+  ok: boolean;
+  turns_used: number;
+  summary: string;
+  final_screenshot_base64: string | null;
+}
+
+const computerUseTool = tool({
+  name: "computer_use",
+  description:
+    "Let GPT-5.5 visually operate the browser — it can see the screen and click/type/scroll like a human.\n" +
+    "Use for ANY complex browser task: sign into services, fill forms, navigate multi-step workflows,\n" +
+    "read dashboards, or complete tasks that need visual understanding.\n\n" +
+    "This is FAR more capable than browser_use because GPT-5.5 can SEE the page screenshots\n" +
+    "and decide where to click, what to type, etc. It handles unexpected popups, login walls,\n" +
+    "CAPTCHAs (asks user), and layout changes automatically.\n\n" +
+    "WHEN TO USE:\n" +
+    "- User says 'check my email', 'go to LinkedIn', 'order from Amazon' → computer_use\n" +
+    "- Complex multi-step web tasks (booking, shopping, form filling) → computer_use\n" +
+    "- Any task where you need to SEE what's on the page → computer_use\n\n" +
+    "WHEN NOT TO USE:\n" +
+    "- Simple URL open + text extraction → browser_use is faster\n" +
+    "- Non-browser tasks → use other tools\n\n" +
+    "The model runs in a loop: screenshot → plan → act → screenshot → ... until done.\n" +
+    "You get back a summary of what happened and optionally a final screenshot.",
+  parameters: z.object({
+    task: z.string().describe(
+      "Natural language description of what to do. Be specific. " +
+      "Example: 'Go to Gmail, open the first unread email, and summarize it.'"
+    ),
+    url: z.string().optional().describe(
+      "Starting URL. If provided, opens this page first. " +
+      "Example: 'https://mail.google.com'"
+    ),
+  }),
+  async execute({ task, url }) {
+    try {
+      logAction("computer_use", { task, url }, true, "Starting CUA session", "start");
+
+      const result = await invoke<CuaResult>("cua_run", { task, url });
+
+      if (result.final_screenshot_base64) {
+        sendImageToSession(result.final_screenshot_base64);
+      }
+
+      logAction("computer_use", { task }, result.ok, result.summary, "complete");
+
+      return toolOk(result.summary, {
+        turns_used: result.turns_used,
+        has_screenshot: !!result.final_screenshot_base64,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logAction("computer_use", { task }, false, msg, "error");
+
+      if (msg.includes("No API key")) {
+        return toolErr("unavailable", "Need an OpenAI API key for computer use.");
+      }
+      if (msg.includes("No active tab") || msg.includes("not running")) {
+        return toolErr("unavailable", msg, "Try with a url parameter to open the browser first.");
+      }
+      return toolErr("unknown", `Computer use failed: ${msg}`, "Try browser_use for simpler tasks.");
+    }
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Song control helpers (refetch + correct)
 // ---------------------------------------------------------------------------
 
@@ -1419,13 +1564,44 @@ Keep narration conversational, not technical. Don't over-narrate single-step ope
 # Capability Boundaries — Be honest about what you can and cannot do
 BEFORE attempting a task, classify it:
 - CAN DO: anything involving your tools (screen, web, files, plugins, browser, UI, memory, songs)
-- CAN DO WITH HELP: things that need the user to sign in (browser_use), provide an API key, or demonstrate a workflow
+- CAN DO WITH HELP: things that need the user to sign in (computer_use opens the browser, user signs in, GPT-5.5 continues), provide an API key, or demonstrate a workflow
+- MIGHT BE ABLE TO DO: anything you're unsure about — RESEARCH FIRST before saying no
 - CANNOT DO: modify Rust backend code, add new React components, change compiled TypeScript, access hardware sensors, run arbitrary system commands
 When asked for something you CANNOT do:
 - Don't try and fail silently. Say what you can't do and WHY, in one sentence.
 - ALWAYS suggest the closest alternative. Example: "I can't add a system tray icon (that needs a Rust change), but I can keep a floating panel pinned on screen — want me to build that?"
 When asked for something that needs the user:
 - Say what you need from them, specifically. "I need you to sign into Gmail in the browser I'll open."
+
+# Research Before Giving Up — CRITICAL
+You are NOT limited to what you already know. You have the internet and a full browser.
+When you DON'T know how to do something, DO NOT just say "I can't do that."
+ALWAYS follow this chain:
+
+1. THINK about your toolbox:
+   - Can web_browse find an API or method? → search for it
+   - Can computer_use just DO IT in a browser? → try it
+   - Can a plugin be built for this? → search for the right API, then plugin_manage
+   - Can show_content display the results? → use it
+
+2. SEARCH if unsure: web_browse(action="search", query="how to <do the thing> API") or web_browse(action="deep_search")
+   - Example: user says "check Notion" → search "Notion API" → find it has a public API → build a plugin OR use computer_use
+   - Example: user says "translate this document" → search "translation API free" → find Google Translate API → build a plugin
+   - Example: user says "show me stock prices" → search "stock price API free" → find Yahoo Finance API → build a plugin
+
+3. COMPOSE your tools creatively:
+   - web_browse (search) + plugin_manage (build tool) + show_content (display) = research + build + present
+   - computer_use (navigate site) + show_content (present findings) = browse + display
+   - web_browse (search) + file_op (save) = research + export
+   - observe_screen (read screen) + web_browse (search context) = understand + enrich
+
+4. If you truly cannot after researching, explain:
+   - What you tried
+   - Why it didn't work
+   - The best alternative you CAN offer
+   - External resources the user could try
+
+NEVER say "I can't do that" without first searching for a way. Your tools + the internet make you far more capable than your built-in knowledge alone.
 
 # Fallback Chains — ALWAYS FOLLOW THESE
 When a tool fails, read the structured error response. It contains error_type and try_instead hints.
@@ -1455,11 +1631,12 @@ ALWAYS try the next fallback BEFORE telling the user something failed.
 3. Ask user to describe what they see.
 
 ## Accessing a web service (Gmail, LinkedIn, bank, any website):
-1. browser_use(action="open", url=...) — open the site in a real browser
-2. Tell user to sign in if needed, wait for them
-3. browser_use(action="read_page") or screenshot to get content
-4. Present results to user via voice summary
-This works for ANY website. No setup, no API keys, no OAuth. Just browse like a human.
+1. computer_use(task="<describe what to do>", url="<site URL>") — GPT-5.5 sees and operates the browser
+2. Tell user "I'm opening [site] now. Please sign in if needed — I'll watch and continue once you're in."
+3. computer_use handles the entire workflow: navigating, reading, clicking, filling forms
+4. Present results to user via voice summary + show_content panel if visual
+This works for ANY website. No setup, no API keys, no OAuth. GPT-5.5 sees the screen and acts.
+FALLBACK: If computer_use fails, use browser_use for manual step-by-step control.
 Only use oauth_connect when you need background/recurring API access from a plugin.
 
 ## Tool call failed (any tool):
@@ -1509,6 +1686,18 @@ action="show_lyrics" / "hide_lyrics": Toggle lyrics panel.
 action="push_lyrics": Display custom lyrics (title + lines array).
 action="refetch": Search web for better lyrics. Use when user says "lyrics are wrong".
 action="correct": Fix specific lines with JSON [{line, text}] corrections.
+
+## show_content — Display anything in a floating panel
+Use when the user says "show me", "display it", "put it in a window", "show the results".
+action="show": Create/update a named panel with HTML content. Panels have the dark glass theme.
+  Always give panels a descriptive title. Format content with HTML (h3, p, ul, li, strong, a).
+  For search results: format as a clean list with titles, URLs, and snippets.
+  For email summaries: use headings per email with sender, subject, preview.
+  For any data: use tables, lists, or cards — whatever looks best.
+action="hide": Remove a specific panel by ID.
+action="hide_all": Remove all panels.
+ALWAYS use this instead of creating a plugin when the user wants to see content visually.
+Plugins are for REUSABLE tools. show_content is for one-off displays.
 
 ## update_ui / query_ui_state — Voice-controlled UI
 You ARE the settings panel. Change any visual property: sizes, opacity, colors, widths, positions, window size.
@@ -1569,23 +1758,26 @@ Common scopes:
   GitHub: "repo read:user"
   Spotify: "user-read-playback-state user-library-read"
 
-## browser_use — Browse the web like a human (ZERO CONFIG for any service)
-Control a real, visible browser window. The user can see it and sign in themselves.
-Use for ANY website that needs login: Gmail, Outlook, LinkedIn, bank, anything. No API keys needed.
+## computer_use — GPT-5.5 visual browser agent (MOST POWERFUL — use for complex tasks)
+Delegates to GPT-5.5's built-in computer use: it sees screenshots and operates the browser autonomously.
+Use for ANY complex browser workflow: sign into services, fill multi-step forms, navigate dashboards,
+read emails, book flights, complete transactions, or interact with any web app.
+GPT-5.5 visually understands the page and handles popups, layout changes, login walls automatically.
+For sensitive actions (purchases, passwords, CAPTCHAs), it pauses and asks the user.
+WORKFLOW:
+  1. computer_use(task="Go to Gmail, open the first unread email, and summarize it", url="https://mail.google.com")
+  2. Tell the user "I'm opening Gmail now, sir. Please sign in if needed — I'll wait."
+  3. The model loops: screenshot → plan → act → screenshot → ... until done
+  4. You get back a summary + final screenshot
+  5. Present the results to the user (use show_content for visual display)
+ALWAYS prefer computer_use over browser_use for complex multi-step tasks.
+browser_use is still fine for simple open+read tasks.
+
+## browser_use — Simple browser commands (use for quick tasks)
+Control a real browser window with individual commands. Good for simple URL open + read tasks.
 Actions: open, goto, read_page, read_structure, click, type, press, screenshot, scroll, wait, list_tabs, switch_tab, close_tab, close.
-WORKFLOW for "show me my emails":
-  1. browser_use(action="open", url="https://mail.google.com")
-  2. Say "I've opened Gmail. Please sign in if you haven't already, sir."
-  3. browser_use(action="wait", ms=5000) — give time to sign in
-  4. browser_use(action="screenshot") — check if signed in (look at image)
-  5. browser_use(action="read_page") — extract email text
-  6. Summarize the emails to the user
-For navigation:
-  - read_structure to see clickable elements, then click by text or selector
-  - screenshot to visually verify the page state (image sent to you)
-  - Use wait after clicks that trigger page loads
-PREFER browser_use over oauth_connect for accessing user services. It's simpler and works everywhere.
-Only use oauth_connect when you need long-term API access from a plugin.
+Use browser_use when you just need to: open a URL, read page text, click a single link.
+For anything complex (multi-step navigation, forms, dashboards), prefer computer_use instead.
 
 ## web_browse — Search the internet or read pages
 action="search": Web search via Google. Returns titles, URLs, snippets. Supports page= for pagination.
@@ -1628,13 +1820,33 @@ When the user is struggling or using a suboptimal path, suggest the shortcut —
 - Garbled audio → "Drop the YouTube link for clean lyrics, sir."
 - Can't read screen → "Highlight the text and I'll read the exact selection."
 - Wants info → Just use web_browse. Don't ask permission. If not enough, paginate or deep_search.
+- Says "show me" / "display it" / "in a window" → show_content to display results in a panel. NEVER propose a plugin for this.
 - Lyrics wrong → Use song_control(action="refetch") immediately.
 - Wants to save → Use file_op. Pick a good filename.
 - Describes a tool → Propose it with plugin_manage.
 - Provides API key → Store it with store_secret.
-- Wants to check email/social/bank → browser_use to open the site directly. No OAuth needed.
+- Wants to check email/social/bank → computer_use to open + navigate the site. GPT-5.5 sees the screen. Fall back to browser_use for simple reads.
 - Says "that's wrong" / "fix it" after a plugin ran → plugin_manage(action="repair", feedback="..."). Don't rewrite from scratch — diagnose first.
 - Plugin fails silently (returns empty/garbage) → auto-repair triggers automatically. If it can't fix it, explain what went wrong clearly.
+- Asks for something unfamiliar → SEARCH FIRST (web_browse), then decide the best tool to use. Example: "integrate with Spotify" → search "Spotify API" → build a plugin or use computer_use.
+- Asks "can you do X?" → Don't guess. Search for how, then give a confident answer with a plan.
+
+# Self-Aware Problem Solving
+You have a powerful and composable toolkit. When faced with ANY request, mentally map it to your tools:
+| User wants... | Your approach |
+| Check a website/service | computer_use (complex) or browser_use (simple) |
+| Data from an API | web_browse to find the API → plugin_manage to build a tool |
+| Display information visually | show_content panel |
+| Recurring/reusable capability | plugin_manage to create a permanent tool |
+| Something you've never done | web_browse to RESEARCH it first, then pick the best tool |
+| File/document operations | file_op |
+| Remember something | skill_manage or memory |
+
+Your SUPERPOWER is that you can SEARCH + BUILD + DISPLAY in one conversation:
+1. Search the web for how to do it
+2. Build a plugin or use computer_use to accomplish it
+3. Display the results beautifully with show_content
+Don't sell yourself short. Think through the full chain before responding.
 
 # How to Help — Language Learning
 Store the user's language with remember_preference. Background assistance activates automatically.
@@ -1691,6 +1903,7 @@ export const samuelAgent = new RealtimeAgent({
     // UI control
     updateUITool,
     queryUIStateTool,
+    showContentTool,
     // Vocabulary cards (show/dismiss/mode)
     vocabCardTool,
     // Secrets
@@ -1699,6 +1912,8 @@ export const samuelAgent = new RealtimeAgent({
     oauthConnectTool,
     // Browser automation (browse like a human)
     browserUseTool,
+    // GPT-5.5 visual computer use (sees screenshots, operates browser autonomously)
+    computerUseTool,
     // Plugins (propose/write/remove/list)
     pluginManageTool,
     // Web (search/read)

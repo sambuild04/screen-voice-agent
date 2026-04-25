@@ -248,6 +248,108 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
         break;
       }
 
+      // ── CUA (Computer Use Agent) actions ──────────────────────────────
+      // These mirror the GPT-5.5 computer tool action vocabulary exactly.
+
+      case "cua_screenshot": {
+        const page = await getActivePage();
+        const buf = await page.screenshot({ type: "png", fullPage: false });
+        const base64 = buf.toString("base64");
+        const vp = page.viewportSize() ?? { width: 1280, height: 900 };
+        reply(cmd.id, true, {
+          base64,
+          mimeType: "image/png",
+          width: vp.width,
+          height: vp.height,
+          title: await page.title(),
+          url: page.url(),
+        });
+        break;
+      }
+
+      case "cua_click": {
+        const page = await getActivePage();
+        const x = cmd.x as number;
+        const y = cmd.y as number;
+        const button = (cmd.button as "left" | "right" | "middle") ?? "left";
+        const modifiers: string[] = (cmd.keys as string[]) ?? [];
+        const pw = modifiers.map(modToPw).filter(Boolean) as string[];
+        for (const m of pw) await page.keyboard.down(m);
+        await page.mouse.click(x, y, { button });
+        for (const m of pw) await page.keyboard.up(m);
+        reply(cmd.id, true, { message: `Clicked (${x}, ${y})` });
+        break;
+      }
+
+      case "cua_double_click": {
+        const page = await getActivePage();
+        const x = cmd.x as number;
+        const y = cmd.y as number;
+        await page.mouse.dblclick(x, y);
+        reply(cmd.id, true, { message: `Double-clicked (${x}, ${y})` });
+        break;
+      }
+
+      case "cua_type": {
+        const page = await getActivePage();
+        await page.keyboard.type(cmd.text as string);
+        reply(cmd.id, true, { message: `Typed ${(cmd.text as string).length} chars` });
+        break;
+      }
+
+      case "cua_keypress": {
+        const page = await getActivePage();
+        const keys: string[] = (cmd.keys as string[]) ?? [cmd.key as string];
+        for (const k of keys) {
+          await page.keyboard.press(normalizeKey(k));
+        }
+        reply(cmd.id, true, { message: `Pressed keys: ${keys.join("+")}` });
+        break;
+      }
+
+      case "cua_scroll": {
+        const page = await getActivePage();
+        const x = (cmd.x as number) ?? 640;
+        const y = (cmd.y as number) ?? 450;
+        const dx = (cmd.scroll_x as number) ?? 0;
+        const dy = (cmd.scroll_y as number) ?? 0;
+        await page.mouse.move(x, y);
+        await page.mouse.wheel(dx, dy);
+        reply(cmd.id, true, { message: `Scrolled (${dx}, ${dy}) at (${x}, ${y})` });
+        break;
+      }
+
+      case "cua_drag": {
+        const page = await getActivePage();
+        const path: { x: number; y: number }[] = cmd.path as { x: number; y: number }[];
+        if (!path || path.length < 2) {
+          reply(cmd.id, false, { error: "Drag needs path with at least 2 points" });
+          break;
+        }
+        await page.mouse.move(path[0].x, path[0].y);
+        await page.mouse.down();
+        for (let i = 1; i < path.length; i++) {
+          await page.mouse.move(path[i].x, path[i].y, { steps: 5 });
+        }
+        await page.mouse.up();
+        reply(cmd.id, true, { message: `Dragged ${path.length} points` });
+        break;
+      }
+
+      case "cua_move": {
+        const page = await getActivePage();
+        await page.mouse.move(cmd.x as number, cmd.y as number);
+        reply(cmd.id, true, { message: `Moved to (${cmd.x}, ${cmd.y})` });
+        break;
+      }
+
+      case "cua_wait": {
+        const page = await getActivePage();
+        await page.waitForTimeout(Math.min((cmd.ms as number) ?? 2000, 15000));
+        reply(cmd.id, true, { message: "Wait complete" });
+        break;
+      }
+
       case "close": {
         if (browser) await browser.close();
         reply(cmd.id, true, { message: "Browser closed" });
@@ -262,6 +364,32 @@ async function handleCommand(cmd: { id: string; action: string; [k: string]: unk
     const msg = err instanceof Error ? err.message : String(err);
     reply(cmd.id, false, { error: msg });
   }
+}
+
+// Map GPT-5.5 modifier names to Playwright modifiers
+function modToPw(key: string): string | null {
+  const m: Record<string, string> = {
+    CTRL: "Control", CONTROL: "Control",
+    ALT: "Alt", OPTION: "Alt",
+    SHIFT: "Shift",
+    META: "Meta", CMD: "Meta", COMMAND: "Meta",
+  };
+  return m[key.toUpperCase()] ?? null;
+}
+
+// Normalize GPT-5.5 key names to Playwright key names
+function normalizeKey(key: string): string {
+  const m: Record<string, string> = {
+    ENTER: "Enter", RETURN: "Enter",
+    TAB: "Tab", ESCAPE: "Escape", ESC: "Escape",
+    BACKSPACE: "Backspace", DELETE: "Delete",
+    SPACE: " ",
+    ARROWUP: "ArrowUp", ARROWDOWN: "ArrowDown",
+    ARROWLEFT: "ArrowLeft", ARROWRIGHT: "ArrowRight",
+    CTRL: "Control", ALT: "Alt", SHIFT: "Shift", META: "Meta",
+    HOME: "Home", END: "End", PAGEUP: "PageUp", PAGEDOWN: "PageDown",
+  };
+  return m[key.toUpperCase()] ?? key;
 }
 
 // Read JSON commands from stdin, one per line

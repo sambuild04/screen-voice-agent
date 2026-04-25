@@ -1,5 +1,6 @@
 mod browser;
 mod commands;
+mod cua;
 mod flashcards;
 mod memory;
 mod oauth;
@@ -10,6 +11,7 @@ mod wake_word;
 
 use browser::*;
 use commands::*;
+use cua::*;
 use flashcards::*;
 use memory::*;
 use oauth::*;
@@ -112,6 +114,7 @@ pub fn run() {
             oauth_refresh,
             browser_command,
             browser_close,
+            cua_run,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
