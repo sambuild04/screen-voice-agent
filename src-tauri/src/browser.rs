@@ -26,8 +26,21 @@ fn ensure_running() -> Result<(), String> {
 
     eprintln!("[browser] spawning browser-agent via npx tsx...");
 
+    // Resolve project root: Tauri binary cwd is src-tauri/, go up one level
+    let project_root = std::env::current_dir()
+        .map(|d| {
+            if d.ends_with("src-tauri") {
+                d.parent().unwrap_or(&d).to_path_buf()
+            } else {
+                d
+            }
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    eprintln!("[browser] project root: {}", project_root.display());
+
     let mut child = Command::new("npx")
         .args(["tsx", "src/lib/browser-agent.ts"])
+        .current_dir(&project_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
