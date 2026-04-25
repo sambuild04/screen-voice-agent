@@ -513,6 +513,21 @@ const showContentTool = tool({
     width: z.string().optional().describe("Panel width (e.g. '300px', '400px'). Default '320px'."),
   }),
   execute({ action, id, title, content, position, width }) {
+    // Register Escape key handler once to close all panels
+    const w = window as unknown as Record<string, unknown>;
+    if (!w.__samuelPanelEscRegistered) {
+      w.__samuelPanelEscRegistered = true;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          const panels = document.querySelectorAll("[id^='samuel-panel-']");
+          if (panels.length > 0) {
+            panels.forEach((el) => el.remove());
+            e.preventDefault();
+          }
+        }
+      });
+    }
+
     if (action === "hide_all") {
       document.querySelectorAll("[id^='samuel-panel-']").forEach((el) => el.remove());
       logAction("show_content", {}, true, "All panels hidden", "hide_all");
@@ -539,7 +554,7 @@ const showContentTool = tool({
         background: rgba(10, 14, 30, 0.9); backdrop-filter: blur(20px);
         -webkit-backdrop-filter: blur(20px);
         border: 1px solid rgba(99, 102, 241, 0.25); border-radius: 14px;
-        padding: 16px; color: #e2e8f0; font-size: 13px; line-height: 1.5;
+        padding: 16px; padding-top: 40px; color: #e2e8f0; font-size: 13px; line-height: 1.5;
         box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
         animation: lyrics-hud-in 0.3s ease both;
         overflow-y: auto; max-height: 80vh;
@@ -553,10 +568,38 @@ const showContentTool = tool({
       document.body.appendChild(panel);
     }
 
-    const titleHtml = title ? `<div style="font-size:15px;font-weight:600;margin-bottom:10px;color:#a5b4fc">${title}</div>` : "";
-    const closeBtn = `<div style="position:absolute;top:8px;right:12px;cursor:pointer;color:#64748b;font-size:18px" onclick="this.parentElement.remove()">×</div>`;
+    const titleHtml = title ? `<div style="font-size:15px;font-weight:600;margin-bottom:10px;color:#a5b4fc;padding-right:36px">${title}</div>` : "";
+    const closeBtn = `<div style="position:absolute;top:8px;right:8px;cursor:pointer;color:#94a3b8;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(99,102,241,0.1);transition:background 0.15s" onmouseenter="this.style.background='rgba(239,68,68,0.3)';this.style.color='#fca5a5'" onmouseleave="this.style.background='rgba(99,102,241,0.1)';this.style.color='#94a3b8'" onclick="this.parentElement.remove()">✕</div>`;
     panel.style.position = "fixed";
-    panel.innerHTML = closeBtn + titleHtml + `<div style="color:#cbd5e1">${content}</div>`;
+
+    // Rewrite links: open in system browser, not inside the Tauri webview
+    const safeContent = content.replace(
+      /<a\s+([^>]*?)href=["']([^"']+)["']([^>]*)>/gi,
+      (_match: string, pre: string, href: string, post: string) => {
+        const clean = href.replace(/'/g, "\\'");
+        return `<a ${pre}href="#" onclick="event.preventDefault();event.stopPropagation();window.__TAURI__?.shell?.open('${clean}')||window.open('${clean}','_blank')" style="color:#818cf8;text-decoration:underline;cursor:pointer" ${post}>`;
+      },
+    );
+
+    panel.innerHTML = closeBtn + titleHtml + `<div style="color:#cbd5e1">${safeContent}</div>`;
+
+    // Safety net: intercept any clicks on <a> tags we might have missed
+    panel.addEventListener("click", (e) => {
+      const target = (e.target as HTMLElement).closest("a");
+      if (target) {
+        e.preventDefault();
+        e.stopPropagation();
+        const href = target.getAttribute("data-href") || target.getAttribute("href");
+        if (href && href !== "#") {
+          // Open in system browser via Tauri shell or fallback
+          if ((window as unknown as Record<string, unknown>).__TAURI__) {
+            invoke("plugin:shell|open", { path: href }).catch(() => window.open(href, "_blank"));
+          } else {
+            window.open(href, "_blank");
+          }
+        }
+      }
+    });
 
     logAction("show_content", { id, position }, true, `Panel "${id}" shown`, "show");
     return toolOk(`Showing "${title ?? id}" panel.`);
