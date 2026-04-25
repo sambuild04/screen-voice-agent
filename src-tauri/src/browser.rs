@@ -41,6 +41,7 @@ fn ensure_running() -> Result<(), String> {
     let mut child = Command::new("npx")
         .args(["tsx", "src/lib/browser-agent.ts"])
         .current_dir(&project_root)
+        .env("PLAYWRIGHT_BROWSERS_PATH", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
