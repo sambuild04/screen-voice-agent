@@ -6,7 +6,6 @@ import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
-import { useTeachMode } from "./hooks/useTeachMode";
 import { useAudioPlayer } from "./hooks/useAudioPlayer";
 import { useSongPlayback } from "./hooks/useSongTeaching";
 import { useUIPreferences } from "./hooks/useUIPreferences";
@@ -16,11 +15,11 @@ import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
 import { WordCard } from "./components/WordCard";
 import { TeachDrop } from "./components/TeachDrop";
-import { TeachViewer } from "./components/TeachViewer";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { LyricsViewer } from "./components/LyricsViewer";
-import { sendTextAndRespond, registerTeachContent, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta } from "./lib/session-bridge";
+import { sendTextAndRespond, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta } from "./lib/session-bridge";
+import type { ContentLine } from "./lib/session-bridge";
 import type { WordCardData } from "./lib/session-bridge";
 import { registerPrivacyPrefsGetter, registerUIStateGetter } from "./lib/samuel";
 
@@ -49,27 +48,11 @@ export default function App() {
     ui.prefs["privacy.screen_watch"] as boolean,
     ui.prefs["privacy.audio_listen"] as boolean,
   );
-  const teachMode = useTeachMode();
-
-  // Latch song data so it survives teachMode.close() (which nulls content)
   const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
-  const [songLines, setSongLines] = useState<import("./hooks/useTeachMode").ContentLine[] | null>(null);
+  const [songLines, setSongLines] = useState<ContentLine[] | null>(null);
   const [songTitle, setSongTitle] = useState<string | null>(null);
   const [songSource, setSongSource] = useState<string | null>(null);
   const [songVideoId, setSongVideoId] = useState<string | null>(null);
-  const isSongContent = !!teachMode.content?.videoId;
-
-  useEffect(() => {
-    if (teachMode.content?.audio_file) {
-      setSongAudioPath(teachMode.content.audio_file);
-    }
-    if (teachMode.content?.videoId && teachMode.content.lines.length > 0) {
-      setSongLines(teachMode.content.lines);
-      setSongTitle(teachMode.content.title ?? null);
-      setSongVideoId(teachMode.content.videoId ?? null);
-      setSongSource(teachMode.content.lyrics_source ?? "unknown");
-    }
-  }, [teachMode.content]);
 
   const audioPlayer = useAudioPlayer(songAudioPath);
   const songPlayback = useSongPlayback({
@@ -103,14 +86,6 @@ export default function App() {
     registerUIStateGetter(() => ui.prefs);
     return () => registerUIStateGetter(null);
   }, [ui.prefs]);
-
-  // Register teach content bridge so Samuel's voice tool can trigger teach mode
-  useEffect(() => {
-    registerTeachContent((input, language) => {
-      teachMode.submit(input, language ?? learning.learningLanguage ?? undefined);
-    });
-    return () => registerTeachContent(null);
-  }, [teachMode.submit, learning.learningLanguage]);
 
   // Register UI update bridge so Samuel can change the UI by voice
   useEffect(() => {
@@ -193,46 +168,6 @@ export default function App() {
     );
     return () => registerSongPlayback(null, null);
   }, [songPlayback.playLines, songPlayback.pause, mute]);
-
-  // When YouTube song lyrics load, inject them into Samuel's context (no panel)
-  const injectedSongRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (
-      teachMode.state === "ready" &&
-      isSongContent &&
-      teachMode.content &&
-      injectedSongRef.current !== teachMode.content.videoId
-    ) {
-      injectedSongRef.current = teachMode.content.videoId!;
-      const hasSyncedTs = teachMode.content.synced;
-      const lyricsText = teachMode.content.lines
-        .map((l, i) => {
-          const ts = l.timestamp !== null
-            ? `[${Math.floor(l.timestamp / 60)}:${Math.floor(l.timestamp % 60).toString().padStart(2, "0")}]`
-            : "";
-          return `${i + 1} ${ts} ${l.text}`;
-        })
-        .join("\n");
-
-      const hasAudio = !!teachMode.content.audio_file;
-      const playbackNote = hasAudio
-        ? `Audio is loaded. Use play_song_lines(from, to) to play any section. ` +
-          (hasSyncedTs
-            ? "Lines have precise timestamps."
-            : "Lyrics are NOT time-synced — playback is approximate (~8s per line from start).") +
-          " The mic mutes automatically during playback and unmutes when the segment ends."
-        : "Audio is still downloading — play_song_lines will work once it finishes. " +
-          "You can explain the lyrics in the meantime.";
-
-      sendTextAndRespond(
-        `[System: Song loaded — "${teachMode.content.title ?? "Unknown"}". ` +
-        `${teachMode.content.lines.length} lines.\n${playbackNote}\n\n` +
-        `Lyrics:\n${lyricsText}\n\n` +
-        `Let the user know the song is ready and ask what they'd like to do.]`,
-      );
-      teachMode.close();
-    }
-  }, [teachMode.state, teachMode.content, isSongContent, teachMode.close]);
 
   // Keep the session alive during recording and while viewing results
   useEffect(() => {
@@ -422,7 +357,6 @@ export default function App() {
         onDismissAnalysis={record.dismiss}
         onTogglePanel={record.togglePanel}
         onClearAnalysis={record.clearAnalysis}
-        teachState={teachMode.state}
         onMailboxToggle={() => setEnvelopeOpen((o) => !o)}
         envelopeSlot={
           <TeachDrop
@@ -436,10 +370,10 @@ export default function App() {
                 `an article URL, an API key, raw text, an image, or a mix of content and a request. ` +
                 `Read the full message to understand what the user wants. ` +
                 `If they included a question or instruction (e.g. "what is this?", "explain this", ` +
-                `"teach me from this"), follow their request. ` +
-                `If it's just a YouTube link with no instruction, start song teaching. ` +
+                `"teach me"), follow their request. ` +
+                `If it's just a YouTube link with no instruction, load the song for teaching. ` +
                 `If it looks like an API key or token, ask what it's for so you can store it with store_secret. ` +
-                `If it's content to study, use teach_from_content. ` +
+                `If they want to see content displayed, use show_content to render it in a panel. ` +
                 `If ambiguous, just respond naturally to what they wrote.]`,
               );
             }}
@@ -461,16 +395,6 @@ export default function App() {
           songPlayback.playLines(lineNum, lineNum, () => mute(false));
         }}
       />
-
-      {/* TeachViewer only for non-song content (articles, text, images) */}
-      {teachMode.state === "ready" && teachMode.content && !isSongContent && (
-        <TeachViewer
-          content={teachMode.content}
-          selectedLine={teachMode.selectedLine}
-          onSelectLine={teachMode.selectLine}
-          onClose={teachMode.close}
-        />
-      )}
 
       <PluginApproval />
 

@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import type { ContentLine } from "./useTeachMode";
+import type { ContentLine } from "../lib/session-bridge";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 
 export interface UseSongPlaybackReturn {

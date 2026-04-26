@@ -12,8 +12,14 @@ type LearningLanguageFn = (language: string | null) => void;
 type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
 type SendAudioClipFn = (pcmBase64: string, contextText?: string) => void;
-type TeachContentFn = (input: string, language?: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
+
+/** Shared content line type used by lyrics, song teaching, etc. */
+export interface ContentLine {
+  text: string;
+  timestamp: number | null;
+  source_index: number;
+}
 
 let sendImageFn: SendImageFn | null = null;
 let sendTextFn: SendTextFn | null = null;
@@ -23,7 +29,6 @@ let learningLanguageFn: LearningLanguageFn | null = null;
 let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 let sendAudioClipFn: SendAudioClipFn | null = null;
-let teachContentFn: TeachContentFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
 
 export function registerSendImage(fn: SendImageFn | null) {
@@ -129,18 +134,6 @@ export function sendAudioClip(pcmBase64: string, contextText?: string): boolean 
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Teach Mode bridge
-// ---------------------------------------------------------------------------
-
-export function registerTeachContent(fn: TeachContentFn | null) {
-  teachContentFn = fn;
-}
-
-/** Called by Samuel's teach_from_content tool to trigger teach mode from voice. */
-export function notifyTeachContent(input: string, language?: string) {
-  teachContentFn?.(input, language);
-}
 
 // ---------------------------------------------------------------------------
 // Song Playback bridge
@@ -204,7 +197,7 @@ export function setLyricsContent(title: string, lines: string[]): boolean {
 // Song lyrics source tracking + hot-swap
 // ---------------------------------------------------------------------------
 
-type ContentLine = import("../hooks/useTeachMode").ContentLine;
+// ContentLine is now defined at the top of this file
 type UpdateSongLinesFn = (lines: ContentLine[]) => void;
 type GetSongMetaFn = () => { title: string | null; source: string | null; videoId: string | null; lines: ContentLine[] };
 
@@ -220,7 +213,7 @@ export function registerGetSongMeta(fn: GetSongMetaFn | null) {
 }
 
 /** Replace the current song lyrics in-place (hot-swap). */
-export function updateSongLines(lines: import("../hooks/useTeachMode").ContentLine[]): boolean {
+export function updateSongLines(lines: ContentLine[]): boolean {
   if (!updateSongLinesFn) return false;
   updateSongLinesFn(lines);
   return true;

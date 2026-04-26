@@ -19,7 +19,6 @@ interface CharacterProps {
   onDismissAnalysis: () => void;
   onTogglePanel: () => void;
   onClearAnalysis: () => void;
-  teachState: string;
   onMailboxToggle: () => void;
   envelopeSlot?: ReactNode;
 }
@@ -46,7 +45,6 @@ export function Character({
   onDismissAnalysis,
   onTogglePanel,
   onClearAnalysis,
-  teachState,
   onMailboxToggle,
   envelopeSlot,
 }: CharacterProps) {
@@ -145,17 +143,11 @@ export function Character({
       {/* Chat input — centered below avatar */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
         <button
-          className={`mailbox-icon ${teachState === "input" ? "mailbox-open" : ""} ${teachState === "processing" ? "mailbox-busy" : ""}`}
+          className="mailbox-icon"
           onClick={onMailboxToggle}
         >
-          {teachState === "processing" ? <MailboxSpinner /> : <ChatSvg />}
+          <ChatSvg />
         </button>
-        {teachState === "processing" && (
-          <div className="mailbox-progress-label">Working on it…</div>
-        )}
-        {teachState === "error" && (
-          <div className="mailbox-progress-label" style={{ color: "#f87171" }}>Failed — tap to retry</div>
-        )}
         {envelopeSlot}
       </div>
 
@@ -318,16 +310,6 @@ function ChatSvg() {
   );
 }
 
-function MailboxSpinner() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="mailbox-spin">
-      <path d="M12 2v4" /><path d="M12 18v4" />
-      <path d="m4.93 4.93 2.83 2.83" /><path d="m16.24 16.24 2.83 2.83" />
-      <path d="M2 12h4" /><path d="M18 12h4" />
-      <path d="m4.93 19.07 2.83-2.83" /><path d="m16.24 7.76 2.83-2.83" />
-    </svg>
-  );
-}
 
 function AnalysisStageIndicator({
   label,

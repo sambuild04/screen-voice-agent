@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "@tauri-apps/api/core";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, notifyTeachContent, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
 interface CaptureResult {
@@ -402,35 +402,6 @@ const recordingTool = tool({
       logAction("recording", {}, false, msg, "stop");
       return toolErr("unknown", msg);
     }
-  },
-});
-
-// ---------------------------------------------------------------------------
-// Teach Mode Tools
-// ---------------------------------------------------------------------------
-
-const teachFromContentTool = tool({
-  name: "teach_from_content",
-  description:
-    "Open the 'Teach me from this' panel to analyze and annotate content for language learning. " +
-    "The content is extracted, annotated with vocabulary and grammar, and displayed in an interactive viewer. " +
-    "Use when the user says 'teach me from this', shares a URL, mentions a YouTube video to study, " +
-    "pastes Japanese text to break down, or wants to study any foreign language content. " +
-    "Supports: YouTube links, article URLs, raw text, image paths.",
-  parameters: z.object({
-    input: z
-      .string()
-      .describe(
-        "The content to teach from — a YouTube URL, article URL, image path, PDF path, or raw text.",
-      ),
-    language: z
-      .string()
-      .optional()
-      .describe("Target language (default: Japanese). E.g. 'Japanese', 'Korean', 'Chinese'."),
-  }),
-  async execute({ input, language }) {
-    notifyTeachContent(input, language ?? undefined);
-    return `Opening the "Teach me from this" panel to analyze the content. The annotated viewer will appear with vocabulary, grammar, and interactive text. Tell the user it's loading.`;
   },
 });
 
@@ -1326,7 +1297,7 @@ async function handleRefetchLyrics(queryOverride?: string): Promise<string> {
   if (!meta.title && !queryOverride) {
     const msg = "No song loaded. Drop a YouTube link first.";
     logAction("song_control", {}, false, msg, "refetch");
-    return toolErr("unavailable", msg, "teach_from_content");
+    return toolErr("unavailable", msg);
   }
 
   const title = queryOverride ?? meta.title ?? "song lyrics";
@@ -1843,10 +1814,6 @@ Say word slowly, then naturally. Include accent/tone info.
 action="start": Begin recording. User says "record this", "start recording".
 action="stop": Stop + transcribe. Do NOT auto-analyze the transcript — wait for user instructions.
 
-## teach_from_content — Analyze content for language learning
-Opens annotated viewer with vocabulary, grammar, tappable words.
-Input: YouTube URL, article URL, image path, raw text.
-
 ## song_control — Play, pause, lyrics, corrections
 action="play": Play from_line to to_line. Mic auto-mutes. SAY what you'll play BEFORE calling.
   For first lines, include margin (from_line=1, to_line=2-3) for instrumental intros.
@@ -2048,7 +2015,7 @@ Manual mode (default): do NOT speak about ambient context unless asked.
 Ambient awareness: [System: Background audio transcript] = silent context. Use it when asked "what did they say?"
 
 # How to Help — Song Teaching
-1. teach_from_content to load the song.
+1. User drops a YouTube link or says "teach me this song".
 2. [System: Song loaded...] arrives with lyrics + line numbers.
 3. Let the user drive: "play line 3", "what does that mean?", "play the chorus".
 4. song_control(action="play", from_line, to_line). SAY what you'll play BEFORE calling.
@@ -2081,8 +2048,7 @@ export const samuelAgent = new RealtimeAgent({
     recordCorrectionTool,
     // Watch / alerts
     watchTool,
-    // Teaching & songs (play/pause/lyrics/refetch/correct)
-    teachFromContentTool,
+    // Songs (play/pause/lyrics/refetch/correct)
     songControlTool,
     // UI control
     updateUITool,

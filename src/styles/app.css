@@ -994,8 +994,8 @@ html, body, #root {
   cursor: not-allowed;
 }
 
-/* ── Teach Mode — Annotated Viewer ───────────────────────── */
-.teach-overlay {
+/* ── Teach Mode styles removed — using show_content panels instead ── */
+.teach-overlay--removed {
   position: fixed;
   inset: 0;
   z-index: 250;

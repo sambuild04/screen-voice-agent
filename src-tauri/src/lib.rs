@@ -6,7 +6,6 @@ mod memory;
 mod oauth;
 mod plugins;
 mod secrets;
-mod teach;
 mod wake_word;
 
 use browser::*;
@@ -17,7 +16,6 @@ use memory::*;
 use oauth::*;
 use plugins::*;
 use secrets::*;
-use teach::*;
 use wake_word::*;
 use tauri::Manager;
 
@@ -89,10 +87,6 @@ pub fn run() {
             delete_flashcard,
             read_flashcard_file,
             increment_flashcard_review,
-            teach_from_content,
-            annotate_lines,
-            read_audio_base64,
-            download_song_audio,
             append_transcript_window,
             assess_viewing_session,
             get_plugin_dir,

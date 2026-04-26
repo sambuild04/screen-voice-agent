@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ContentLine } from "../hooks/useTeachMode";
+import type { ContentLine } from "./session-bridge";
 
 // ── YouTube metadata via oEmbed ──────────────────────────────────────────────
 

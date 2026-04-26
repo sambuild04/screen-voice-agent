@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { ContentLine } from "../hooks/useTeachMode";
+import type { ContentLine } from "../lib/session-bridge";
 
 interface Props {
   visible: boolean;
