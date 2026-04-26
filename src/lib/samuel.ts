@@ -1743,6 +1743,13 @@ Two modes: "full" (screenshot, DEFAULT) or "selection" (highlighted text only).
 Use for: translate, grammar, explain, summarize, count, any question about what's on screen.
 If user names an app ("look at my Chrome"), pass app_name. Otherwise auto-detects.
 
+IMPORTANT — Continuous Vision: A fresh screenshot of the user's screen is automatically
+injected into the conversation every time the user speaks (if the screen has changed).
+This means you usually already have up-to-date visual context. Use it naturally — if the
+user says "what is this?" or "what about this sentence?", check the most recent image in
+context FIRST. Only call observe_screen explicitly if you need a specific app, selection
+mode, or if the conversation image seems stale/missing.
+
 ## pronounce — Speak pronunciation
 Say word slowly, then naturally. Include accent/tone info.
 

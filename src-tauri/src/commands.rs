@@ -40,6 +40,8 @@ struct ScreenState {
 }
 static SCREEN_STATE: Mutex<Option<ScreenState>> = Mutex::new(None);
 
+// Separate tracker for auto-screenshot injection (per user utterance)
+static AUTO_SCREEN_HASH: Mutex<u64> = Mutex::new(0);
 
 // Apps where Samuel stays silent (deep focus)
 const FOCUS_APPS: &[&str] = &[
@@ -179,6 +181,23 @@ pub async fn create_ephemeral_key() -> Result<String, String> {
 #[tauri::command]
 pub async fn capture_active_window(app_name: Option<String>) -> Result<CaptureResult, String> {
     capture_focused_window(app_name)
+}
+
+/// Capture a screenshot only if the screen has changed since the last capture.
+/// Used for auto-injecting fresh screenshots when the user speaks, so the model
+/// always sees the current screen without wasting tokens on identical images.
+#[tauri::command]
+pub async fn capture_if_changed() -> Result<Option<CaptureResult>, String> {
+    let capture = capture_focused_window(None)?;
+    let current_hash = hash_bytes(capture.base64.as_bytes());
+
+    let mut prev_hash = AUTO_SCREEN_HASH.lock().map_err(|e| format!("lock: {e}"))?;
+    if *prev_hash == current_hash {
+        return Ok(None);
+    }
+    *prev_hash = current_hash;
+    eprintln!("[auto-screen] screen changed (app={}), injecting", capture.app_name);
+    Ok(Some(capture))
 }
 
 /// Read the currently selected/highlighted text from any app via the clipboard.

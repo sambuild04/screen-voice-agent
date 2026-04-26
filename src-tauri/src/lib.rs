@@ -56,6 +56,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_ephemeral_key,
             capture_active_window,
+            capture_if_changed,
             get_config,
             transcribe_audio,
             list_displays,

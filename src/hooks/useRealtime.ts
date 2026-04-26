@@ -277,6 +277,28 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "input_audio_buffer.speech_stopped":
           setAgentState("thinking");
+          // Auto-inject a fresh screenshot so Samuel always sees the current
+          // screen when responding. This makes "what is this?" and "what about
+          // this?" work without Samuel needing to call observe_screen first.
+          // Uses a lightweight capture — only injects if screen has changed.
+          invoke<{ base64: string; app_name: string } | null>("capture_if_changed")
+            .then((result) => {
+              if (result && sessionRef.current) {
+                sessionRef.current.transport.sendEvent({
+                  type: "conversation.item.create",
+                  item: {
+                    type: "message",
+                    role: "user",
+                    content: [{
+                      type: "input_image",
+                      image_url: `data:image/jpeg;base64,${result.base64}`,
+                    }],
+                  },
+                });
+                console.log(`[auto-screen] injected fresh screenshot (${result.app_name})`);
+              }
+            })
+            .catch(() => {}); // non-critical, don't block response
           break;
 
         case "conversation.item.input_audio_transcription.completed": {
