@@ -14,6 +14,8 @@ type SendTextAndRespondFn = (text: string) => void;
 type SendAudioClipFn = (pcmBase64: string, contextText?: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
 type SetVolumeFn = (pct: number) => void;
+type SetPassiveListeningFn = (passive: boolean) => void;
+type DiscardLastTurnFn = (reason: string) => { removed: number; cancelled: boolean };
 
 /** Shared content line type used by lyrics, song teaching, etc. */
 export interface ContentLine {
@@ -32,6 +34,24 @@ let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 let sendAudioClipFn: SendAudioClipFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
 let setVolumeFn: SetVolumeFn | null = null;
+let setPassiveListeningFn: SetPassiveListeningFn | null = null;
+let discardLastTurnFn: DiscardLastTurnFn | null = null;
+
+export function registerDiscardLastTurn(fn: DiscardLastTurnFn | null) {
+  discardLastTurnFn = fn;
+}
+
+/**
+ * Erase the last user turn (and any in-flight or completed assistant reply
+ * to it) from the live RealtimeSession. Used when the user says "that wasn't
+ * me" / "that's not my voice" / "ignore that last one" — typically because
+ * background audio (a video, music, another person) was misheard as a
+ * command. Returns counts so the calling tool can confirm what happened.
+ */
+export function discardLastTurn(reason: string): { removed: number; cancelled: boolean } {
+  if (!discardLastTurnFn) return { removed: 0, cancelled: false };
+  return discardLastTurnFn(reason);
+}
 
 export function registerSetVolume(fn: SetVolumeFn | null) {
   setVolumeFn = fn;
@@ -40,6 +60,22 @@ export function registerSetVolume(fn: SetVolumeFn | null) {
 export function setVolume(pct: number): boolean {
   if (!setVolumeFn) return false;
   setVolumeFn(pct);
+  return true;
+}
+
+export function registerSetPassiveListening(fn: SetPassiveListeningFn | null) {
+  setPassiveListeningFn = fn;
+}
+
+/**
+ * Switch Samuel between normal listening (auto-respond to clear user speech)
+ * and passive listening (only respond when explicitly addressed by name or
+ * via chat). Use when the user is watching/playing media and the mic is
+ * picking up dialogue that gets misinterpreted as commands.
+ */
+export function setPassiveListening(passive: boolean): boolean {
+  if (!setPassiveListeningFn) return false;
+  setPassiveListeningFn(passive);
   return true;
 }
 

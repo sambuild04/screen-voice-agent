@@ -1,12 +1,12 @@
 # Samuel — the AI that works with you, not for you
 
-An always-on voice AI desktop assistant for macOS that sees your screen, hears your audio, browses the web in the background, writes its own tools, and fixes them when they break — all without ever stealing your cursor or interrupting your flow. Built with Tauri v2, React, TypeScript, and Playwright. MIT licensed.
+An always-on voice AI desktop assistant for macOS that sees your screen, hears your audio, browses the web in the background, writes its own tools, and fixes them when they break — all without ever stealing your cursor or interrupting your flow. Built with Electron, React, TypeScript, and Playwright. MIT licensed.
 
 **Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation, ambient monitoring ("tell me when you see/hear X").
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
-![Tauri v2](https://img.shields.io/badge/Tauri-v2-orange.svg)
+![Electron](https://img.shields.io/badge/Electron-37-47848F.svg)
 ![OpenAI Realtime API](https://img.shields.io/badge/OpenAI-Realtime%20Voice-412991.svg)
 ![GPT-5.5](https://img.shields.io/badge/GPT--5.5-reasoning-10a37f.svg)
 ![Playwright](https://img.shields.io/badge/Playwright-browser%20automation-2EAD33.svg)
@@ -14,6 +14,15 @@ An always-on voice AI desktop assistant for macOS that sees your screen, hears y
 [![Contributors](https://img.shields.io/github/contributors/sambuild04/screen-voice-agent.svg)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
 
 > **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, browses the web for you, writes his own tools with GPT-5.5, auto-repairs them when they break, and remembers everything across sessions.
+
+## What's New
+
+- **Smart context decisions** — Samuel now decides per-turn whether your screen is even relevant before capturing it. Acks ("yes", "thanks"), command-intent ("play music on YouTube"), service mentions ("check my Gmail"), and meta-questions ("what can you do?") skip the AX-tree read + screenshot entirely. Saves ~1.3s of latency and ~150 KB of tokens per turn.
+- **"That wasn't me"** — say "that's not my voice", "ignore that last one", or "I didn't say that" and Samuel erases the bogus user turn AND any reply to it from session memory + UI. Side effects (tab switches, key presses) get a verbal "want me to revert?" offer.
+- **Listening modes** — say "I'm watching anime, ignore the audio" and Samuel goes passive (only responds when addressed by name). Audio is still captured silently so you can later ask "what did they just say?".
+- **Control modes** — `background_workspace` / `observe_only` / `ask_before_action` / `takeover` switch between zero-touch ambient, read-only, ask-on-write, and full hands-on-keyboard.
+- **Per-tab window capture** — Chrome/Safari/Arc captures hit the *exact* window matching the active tab title, not whichever browser window the OS happens to focus. Multi-display friendly.
+- **No more session teardowns** — captured JPEGs are hard-capped to fit WebRTC's SCTP message limit (quality + width step-down), eliminating `INVALID_RANGE` reconnect loops.
 
 ---
 
@@ -122,10 +131,61 @@ Triggers are first-class objects with cooldowns, enable/disable, fire counts, an
 
 Samuel runs a continuous perception loop:
 
-- **Screen** — captures via GPT-4o Vision every 20s with smart change detection; fresh screenshot auto-injected when you speak
+- **Screen** — captures via GPT-4o Vision every 20s with smart change detection; fresh screenshot auto-injected when you speak (only when relevant — see Smart Context below)
 - **Audio** — transcribes system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice)
 - **Context injection** — feeds observations silently so he always knows what's happening
 - **Watcher loop** — evaluates active triggers against every audio/screen event, fires synthetic turns to speak proactively
+
+### Smart Context — Decide Before Capturing
+
+Always-on perception used to mean an AX-tree read + screenshot encode + injection on *every* user turn — ~1.3s of latency before Samuel could even start replying. Most turns don't need it.
+
+Samuel now classifies each transcript before deciding to capture:
+
+| Intent | Example | Captures? |
+|---|---|---|
+| Conversational ack | "yes", "thanks", "got it" | No — prior context still applies |
+| Meta / chitchat | "what can you do?", "how are you?", "tell me a joke" | No — screen is irrelevant |
+| Service mention | "play music on YouTube", "check my Gmail" | No — model uses tools to access the service |
+| Command verb | "open Mail", "find that file" | No — model fetches fresh data via tools |
+| Referential | "translate this", "what does that say" | **Yes** — pointing at the current screen |
+| Anything else | "summarize this PDF" | Yes — defaults to capture when ambiguous |
+
+When the screen is genuinely relevant, captures are de-duped by AX-tree hash (skip if nothing changed) and gated by a 5s cooldown to prevent token floods.
+
+### Voice-First Recovery — "That wasn't me"
+
+The mic can't tell your voice from background audio. When a video, music, another person, or a Whisper hallucination gets transcribed as a command, Samuel will act on it. Telling him is the fix:
+
+```
+You:     "Hey Samuel, ignore that last one — that wasn't me."
+Samuel:  *cancels in-flight TTS* → erases bogus turn from memory + UI
+         "Sorry, sir — I picked up background audio. I switched to your
+          DoorDash tab; want me to switch back?"
+```
+
+Trigger phrases:
+- "That wasn't me" / "That's not my voice" / "I didn't say that"
+- "Ignore that last one" / "Forget what I just said"
+- "That was the video / TV / kid / coworker, not me"
+- "Oops, that wasn't a command"
+
+Memory rewinds; physical side effects don't auto-undo (a tab already switched, a key already pressed) but Samuel offers to revert them verbally. Layered with **passive listening mode** ("ignore my audio while I watch") for proactive prevention when you know background audio is coming.
+
+### Listening Modes & Control Modes
+
+Two voice-controllable axes for non-interruptive UX:
+
+| Mode axis | Voice command | What changes |
+|---|---|---|
+| Listening: `passive` | "I'm watching anime, ignore the audio" | Drops VAD-triggered turns until you address Samuel by name |
+| Listening: `normal` | "Done watching, you can listen normally" | Auto-respond to any clear speech |
+| Control: `background_workspace` | "Stay in the background" | Zero-touch — watch & alert only, no actions |
+| Control: `observe_only` | "Just observe" | Read tools allowed, no writes/clicks |
+| Control: `ask_before_action` (default) | "Ask me before doing things" | Navigation & media keys auto-allowed; writes need approval |
+| Control: `takeover` | "Take the wheel" | Full keyboard/mouse control, no per-action prompts |
+
+Inside `ask_before_action`, key-risk is classified per-action: media keys (`k`, `space`, arrows), Enter, Tab, Escape, and copy/paste auto-approve as `navigation`; only destructive shortcuts (`cmd+w`, `cmd+q`, `cmd+s`, bare `delete`) trip the approval card. No more "should I press k?" loops while playing music.
 
 ### Capability Boundaries — Honest About What He Can and Cannot Do
 
@@ -170,6 +230,9 @@ Samuel is his own settings panel. No menus, no preferences screen:
 | "Speak quieter" / "You're too loud" | Samuel's voice volume adjusts independently |
 | "Turn down the video" | macOS system volume adjusts |
 | "Reset the UI" | All visual settings restored |
+| "That's not my voice" / "Ignore that last one" | Last turn erased from memory + UI |
+| "I'm watching a video, ignore the audio" | Switches to passive listening |
+| "Take the wheel" / "Stay in the background" | Switches control mode |
 
 ---
 
@@ -222,22 +285,26 @@ Toggle screen watching and audio listening directly from the settings button. Al
 ## Architecture
 
 ```
-"Hey Samuel" → Wake word → OpenAI Realtime API → 20+ tools → Voice response
+"Hey Samuel" → Wake word → OpenAI Realtime API → 30+ tools → Voice response
                                     ↕
          ┌─ Loop 1: Conversation loop (user-driven, reactive)
-         │   Screen capture (GPT-4o Vision, change detection, auto-inject on speech)
-         │   System audio (ScreenCaptureKit, PID-level filtering)
+         │   Smart context: classify transcript → decide AX+screenshot or skip
+         │   Screen capture: per-tab window match (Chrome/Safari/Arc), JPEG hard-cap
+         │   System audio (ScreenCaptureKit, PID-level filtering, echo guard)
          │   Browser automation (Playwright, headed Chromium, visible to user)
+         │   Recovery: discard_last_turn for misheard background audio
          │
          ├─ Loop 2: Watcher loop (event-driven, proactive)
          │   Trigger evaluation: keyword match + GPT-4o-mini classifier
          │   Synthetic turn injection → Samuel speaks unprompted
          │   Cooldowns + agent-state-aware (no interrupts mid-speech)
          │
+         ├─ Modes: listening (normal/passive) + control (4 levels) + per-key risk
          ├─ Plugin system: propose → GPT-5.5 generate → review → validate → install
          ├─ Auto-repair: detect failure → GPT-5.5 diagnose → route repair → verify
          ├─ Wraps/middleware: plugins extend existing tools without replacing them
          ├─ Skill system: execute workflow → save as skill → replay next time
+         ├─ Computer Use: GPT-5.5 visual desktop control via computer_use_preview
          ├─ OAuth: PKCE + built-in client IDs → zero-config for known providers
          ├─ Song playback: yt-dlp → local audio → HTML5 <audio> with seek
          ├─ Recording: Whisper transcribe → user-directed analysis
@@ -262,21 +329,29 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | Tool | What it does |
 |---|---|
 | `observe_screen` | Captures and analyzes what's on screen |
+| `read_app` | Reads any macOS app via Accessibility Tree (Chrome, WeChat, Slack, Notes...) |
+| `list_browser_tabs` / `switch_browser_tab` | Enumerate + switch Chrome/Safari tabs by title |
 | `browser_use` | Opens real browser, navigates, reads, clicks, types, screenshots |
+| `computer_use` | GPT-5.5 visual desktop control — sees screen, operates any app via CGEvent |
+| `desktop_click` / `desktop_type` / `desktop_key` / `desktop_scroll` | Native macOS input — per-key risk classification |
+| `focus_app` / `open_app` | App focus + launch |
 | `web_browse` | Search the internet (3 tiers) and read web pages |
 | `plugin_manage` | Self-modification — propose, write, **repair**, remove, list plugins |
 | `skill_manage` | Save, search, and replay multi-step workflows |
 | `song_control` | Play, pause, lyrics, refetch, correct |
 | `recording` | Start/stop system audio capture |
 | `watch_for` | Register ambient triggers — keyword or classifier-based |
+| `set_control_mode` | Switch background / observe / ask / takeover |
+| `set_listening_mode` | Switch normal / passive listening |
+| `discard_last_turn` | Erase the last turn from memory ("that wasn't me") |
+| `set_learning_language` | Activate ambient language tutoring |
 | `set_volume` | Adjust Samuel's voice or macOS system volume |
-| `update_ui` | Voice-controlled UI changes |
+| `update_ui` / `query_ui_state` / `show_content` | Voice-controlled UI changes |
 | `vocab_card` | Vocabulary cards (manual/auto mode) |
 | `oauth_connect` | Zero-config OAuth for Google/GitHub/Spotify |
 | `file_op` | Read, write, list files on disk |
 | `store_secret` | Secure API key storage |
-| `remember_preference` | Persistent user facts and preferences |
-| `record_correction` | Behavioral feedback storage |
+| `remember_preference` / `mark_vocabulary_known` / `record_correction` | Persistent memory |
 | `get_recent_actions` | Self-awareness — recall recent tool calls |
 | `pronounce` | Speak correct pronunciation |
 
@@ -286,20 +361,23 @@ Toggle screen watching and audio listening directly from the settings button. Al
 
 | Layer | Technology |
 |---|---|
-| Desktop | [Tauri v2](https://v2.tauri.app) (Rust + WebView) |
+| Desktop | [Electron](https://www.electronjs.org/) (Chromium + Node main process) |
 | Frontend | React 19 + Vite + TypeScript |
-| Voice | [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) (WebRTC) |
+| Voice | [OpenAI Realtime API](https://platform.openai.com/docs/guides/realtime) (WebRTC, SCTP-bounded payloads) |
 | Agent Framework | [@openai/agents](https://github.com/openai/openai-agents-js) |
 | Code Generation | GPT-5.5 with reasoning tokens via Responses API |
+| Visual Desktop Control | GPT-5.5 `computer_use_preview` via Responses API |
 | Vision | GPT-4o Vision |
 | Browser Automation | [Playwright](https://playwright.dev) (headed Chromium) |
+| Native Desktop Input | macOS Accessibility API + CGEvent (click/type/key/scroll) |
+| AX Tree | macOS Accessibility Tree multi-app reader |
 | Plugin Runtime | `new Function()` + secrets + UI injection + validates + wraps |
 | OAuth | PKCE + built-in client IDs (Google, GitHub, Spotify) |
 | Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
 | Lyrics | [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) + web search fallback |
 | Web Search | [SerpAPI](https://serpapi.com) (Google) + OpenAI deep search + Brave fallback |
 | Animation | [Rive](https://rive.app) |
-| Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` |
+| Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` + per-tab title match |
 | Audio Capture | ScreenCaptureKit (Swift), PID-level filtering |
 
 ---
@@ -311,7 +389,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
 ### Prerequisites
 
 - macOS 14+ (Sonoma or later)
-- Node.js 20+ and Rust ([rustup.rs](https://rustup.rs))
+- Node.js 20+
 - OpenAI API key with Realtime API + GPT-5.5 access
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp`) for song features
 
@@ -323,15 +401,17 @@ git clone https://github.com/sambuild04/screen-voice-agent.git
 cd screen-voice-agent
 npm install
 npx playwright install chromium
-swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
+swiftc -o helpers/record-audio helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
-echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
+mkdir -p ~/.samuel && echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
 ```
 
-Grant Screen Recording permission: **System Settings → Privacy & Security → Screen Recording** → add Peekaboo + Samuel.
+Grant macOS permissions:
+- **System Settings → Privacy & Security → Screen Recording** → add Samuel + Peekaboo
+- **System Settings → Privacy & Security → Accessibility** → add Samuel (needed for AX-tree reads + native input)
 
 ```bash
-npm run tauri:dev
+npm run electron:dev
 ```
 
 Say **"Hey Samuel"** and start talking.
@@ -444,7 +524,7 @@ Samuel is growing fast. Every contribution — code, skills, ideas, bug reports 
 ### What we need help with
 
 - **Windows + Linux ports** — ScreenCaptureKit alternatives (WASAPI, PipeWire/PulseAudio)
-- **One-click installer** — signed `.dmg` packaging (Tauri experience welcome)
+- **One-click installer** — signed `.dmg` packaging via `electron-builder`
 - **Persistent browser sessions** — save Playwright cookies/profiles across launches
 - **Plugin sandboxing** — Web Worker isolation for plugin execution
 - **MCP integration** — `@openai/agents` + MCP servers for Notion, Slack, etc.
@@ -469,10 +549,10 @@ git clone https://github.com/sambuild04/screen-voice-agent.git
 cd screen-voice-agent
 npm install
 npx playwright install chromium
-swiftc -o src-tauri/helpers/record-audio src-tauri/helpers/record-audio.swift \
+swiftc -o helpers/record-audio helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
-echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
-npm run tauri:dev
+mkdir -p ~/.samuel && echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
+npm run electron:dev
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow and PR process.

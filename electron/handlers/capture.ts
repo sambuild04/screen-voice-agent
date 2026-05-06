@@ -268,14 +268,22 @@ function captureFullDisplay(): CaptureResult {
 		throw new Error("Captured image too small");
 	}
 
+	// HARD CAP at 140KB: this image gets packed into a conversation.item.create
+	// event together with up to 6KB of AX text + JSON wrapper. After base64
+	// expansion the whole event lands around ~190KB, which fits the WebRTC
+	// SCTP message limit. Old 200KB cap was sized assuming image-only events
+	// — a 200KB JPEG + 6KB AX produced ~280KB events that triggered
+	// INVALID_RANGE and tore down the session (see 458→370→...→206KB chain
+	// in the YouTube/Classroom of the Elite log). Step both quality AND
+	// width down so we never bottom out at unreadable q=15.
 	let quality = 55;
-	const width = 1440;
-
-	// Re-encode to JPEG with size target <200KB
+	const widths = [1440, 1200, 1024];
+	let widthIdx = 0;
+	const SIZE_CAP = 140_000;
 	while (true) {
 		try {
 			execFileSync("/usr/bin/sips", [
-				"--resampleWidth", String(width),
+				"--resampleWidth", String(widths[widthIdx]),
 				"--setProperty", "format", "jpeg",
 				"--setProperty", "formatOptions", String(quality),
 				tmpPng,
@@ -287,10 +295,16 @@ function captureFullDisplay(): CaptureResult {
 		}
 
 		const size = statSync(tmpJpg).size;
-		if (size <= 200_000 || quality <= 20) break;
+		if (size <= SIZE_CAP) break;
 		quality -= 10;
+		// Once quality drops below 35, shrink width before going lower.
+		if (quality < 35 && widthIdx < widths.length - 1) {
+			widthIdx++;
+			quality = 50;
+		}
+		if (quality <= 20 && widthIdx === widths.length - 1) break;
 		console.error(
-			`[capture] JPEG too large (${size}B), retrying at quality ${quality}`,
+			`[capture] JPEG too large (${size}B), retrying q=${quality} w=${widths[widthIdx]}`,
 		);
 	}
 
@@ -298,7 +312,7 @@ function captureFullDisplay(): CaptureResult {
 
 	const jpgData = readFileSync(tmpJpg);
 	console.error(
-		`[capture] full-display JPEG: ${jpgData.length} bytes (q=${quality}, w=${width})`,
+		`[capture] full-display JPEG: ${jpgData.length} bytes (q=${quality}, w=${widths[widthIdx]})`,
 	);
 	tryRemove(tmpJpg);
 
@@ -359,28 +373,93 @@ end tell`;
 	);
 
 	let usedFullScreen = false;
+	let usedWindowTitle = false;
 
-	// Try peekaboo window capture
+	// For browsers, ask peekaboo to capture the SPECIFIC window matching the
+	// active tab title. This avoids the multi-window/multi-display ambiguity
+	// that bit us before (Gmail tab on display 2, YouTube on display 3 — old
+	// path captured the wrong display).
+	let activeBrowserTitle: string | null = null;
 	if (targetApp) {
+		const lower = targetApp.toLowerCase();
+		const titleScript = lower.includes("chrome")
+			? `tell application "Google Chrome" to return title of active tab of window 1`
+			: lower.includes("safari")
+				? `tell application "Safari" to return name of current tab of window 1`
+				: lower.includes("arc")
+					? `tell application "Arc" to return title of active tab of window 1`
+					: null;
+		if (titleScript) {
+			try {
+				const title = execFileSync(
+					"/usr/bin/osascript",
+					["-e", titleScript],
+					{ encoding: "utf-8" },
+				).trim();
+				if (title) activeBrowserTitle = title;
+			} catch {
+				// ignore
+			}
+		}
+	}
+
+	const probePeekabooFile = (label: string, stdout: string) => {
+		const exists = existsSync(tmpPng);
+		const sz = exists ? statSync(tmpPng).size : 0;
+		console.error(
+			`[capture] peekaboo ${label}: exists=${exists} size=${sz}B stdout=${truncateStr(stdout, 200)}`,
+		);
+		return exists && sz > 10_000;
+	};
+
+	if (targetApp && activeBrowserTitle) {
 		try {
-			runPeekaboo([
+			console.error(
+				`[capture] peekaboo by title: "${truncateStr(activeBrowserTitle, 60)}"`,
+			);
+			tryRemove(tmpPng);
+			const out = runPeekaboo([
 				"image",
-				"--app",
-				targetApp,
-				"--format",
-				"png",
-				"--path",
-				tmpPng,
+				"--app", targetApp,
+				"--mode", "window",
+				"--window-title", activeBrowserTitle,
+				"--format", "png",
+				"--path", tmpPng,
+				"--json",
 			]);
-		} catch {
-			// fall through
+			usedWindowTitle = probePeekabooFile("window-title", out);
+		} catch (e) {
+			console.error(
+				`[capture] peekaboo --window-title threw: ${e instanceof Error ? e.message : e}`,
+			);
+			tryRemove(tmpPng);
+		}
+	}
+
+	// Generic peekaboo (frontmost window of app) fallback.
+	if (!usedWindowTitle && targetApp) {
+		try {
+			tryRemove(tmpPng);
+			const out = runPeekaboo([
+				"image",
+				"--app", targetApp,
+				"--mode", "window",
+				"--format", "png",
+				"--path", tmpPng,
+				"--json",
+			]);
+			probePeekabooFile("generic", out);
+		} catch (e) {
+			console.error(
+				`[capture] peekaboo (generic) threw: ${e instanceof Error ? e.message : e}`,
+			);
 		}
 	}
 
 	const peekabooOk =
 		existsSync(tmpPng) && statSync(tmpPng).size > 10_000;
 
-	if (!peekabooOk) {
+	if (!peekabooOk && !usedWindowTitle) {
 		tryRemove(tmpPng);
 
 		const displayIdx = targetApp
@@ -407,24 +486,53 @@ end tell`;
 		);
 	}
 
-	try {
-		execFileSync("/usr/bin/sips", [
-			"--resampleWidth", "1024",
-			"--setProperty", "format", "jpeg",
-			"--setProperty", "formatOptions", "60",
-			tmpPng,
-			"--out", tmpJpg,
-		]);
-	} catch {
-		tryRemove(tmpPng);
-		throw new Error("Failed to resize screenshot");
+	// HARD CAP at ~190KB. The OpenAI Realtime SDK sends images as a single
+	// JSON event over the WebRTC SCTP data channel; with base64 encoding
+	// (~33% overhead) anything above ~190KB JPEG can blow past the
+	// negotiated SCTP message size and trigger INVALID_RANGE, which tears
+	// down the session (we hit this with a 409KB JPEG at q=85/1920w).
+	// The proven auto-context capture lands at ~177KB and transmits
+	// reliably; we mirror its sizing for observe_screen.
+	let quality = 65;
+	const widths = [1440, 1280, 1024];
+	let widthIdx = 0;
+	const SIZE_CAP = 190_000;
+	while (true) {
+		try {
+			execFileSync("/usr/bin/sips", [
+				"--resampleWidth", String(widths[widthIdx]),
+				"--setProperty", "format", "jpeg",
+				"--setProperty", "formatOptions", String(quality),
+				tmpPng,
+				"--out", tmpJpg,
+			]);
+		} catch {
+			tryRemove(tmpPng);
+			throw new Error("Failed to resize screenshot");
+		}
+		const sz = statSync(tmpJpg).size;
+		if (sz <= SIZE_CAP || quality <= 35) break;
+		// Drop quality first; only shrink width once we're already at q=50.
+		quality -= 8;
+		if (quality < 50 && widthIdx < widths.length - 1) {
+			widthIdx++;
+			quality = 65;
+		}
+		console.error(
+			`[capture] focus JPEG too large (${sz}B), retry q=${quality} w=${widths[widthIdx]}`,
+		);
 	}
 
 	tryRemove(tmpPng);
 
 	const jpgData = readFileSync(tmpJpg);
+	const captureMode = usedFullScreen
+		? "display"
+		: usedWindowTitle
+			? "window-title"
+			: "peekaboo";
 	console.error(
-		`[capture] final JPEG: ${jpgData.length} bytes (full_screen=${usedFullScreen})`,
+		`[capture] final JPEG: ${jpgData.length} bytes (mode=${captureMode}, q=${quality}, w=${widths[widthIdx]})`,
 	);
 
 	try {

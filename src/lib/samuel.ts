@@ -2,7 +2,7 @@ import { RealtimeAgent, tool, backgroundResult } from "@openai/agents/realtime";
 import { hostedMcpTool } from "@openai/agents-core";
 import { z } from "zod";
 import { invoke } from "./invoke-bridge";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta, setVolume } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, dismissCurrentCard, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, playSongLines, pauseSong, showWordCard, setCardMode, toggleLyricsView, setLyricsContent, updateSongLines, getSongMeta, setVolume, setPassiveListening, discardLastTurn } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
 interface CaptureResult {
@@ -45,6 +45,42 @@ type ControlMode = "background_workspace" | "observe_only" | "ask_before_action"
 type RiskLevel = "read" | "navigation" | "write" | "sensitive";
 
 let currentControlMode: ControlMode = "ask_before_action";
+
+// Classify the risk of a desktop_key press. Most keypresses are app-level
+// navigation (media controls, arrow keys, app-defined shortcuts like YouTube's
+// k/j/l). Only a small destructive set (close tab/window, quit, save, reload,
+// trash) needs explicit approval in ask_before_action mode.
+const DESTRUCTIVE_KEY_SHORTCUTS = new Set<string>([
+  "cmd+q",            // Quit app
+  "cmd+w",            // Close window/tab
+  "cmd+shift+q",      // Log out
+  "cmd+shift+w",      // Close all windows
+  "cmd+s",            // Save (often modifies files)
+  "cmd+r",            // Reload (loses page state)
+  "cmd+shift+r",      // Hard reload
+  "cmd+delete",       // Move to trash / delete forward
+  "cmd+backspace",    // Delete file/line
+  "shift+cmd+delete", // Empty trash
+  "ctrl+c",           // Interrupt running process
+]);
+
+function classifyKeyRisk(key: string, modifiers?: string | null): RiskLevel {
+  const k = key.trim().toLowerCase();
+  const mods = (modifiers ?? "")
+    .split(",")
+    .map((m) => m.trim().toLowerCase())
+    .filter(Boolean)
+    .map((m) => (m === "alt" ? "opt" : m))
+    .sort()
+    .join("+");
+  const sig = mods ? `${mods}+${k}` : k;
+  if (DESTRUCTIVE_KEY_SHORTCUTS.has(sig)) return "write";
+  // Plain delete/backspace alone can erase content in a focused field.
+  if (!mods && (k === "delete" || k === "backspace")) return "write";
+  // Everything else (media keys, arrows, return, tab, escape, copy/paste,
+  // YouTube shortcuts like k/j/l/m/f, app-defined letters) is navigation.
+  return "navigation";
+}
 
 function guardAction(risk: RiskLevel, action: string, target: string): string | null {
   const mode = currentControlMode;
@@ -534,6 +570,117 @@ const setControlModeTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Listening Mode — passive vs normal
+// Lets the user say "that's the video, not me" and have Samuel stop
+// auto-responding to mic input until they explicitly address him by name.
+// ---------------------------------------------------------------------------
+
+const setListeningModeTool = tool({
+  name: "set_listening_mode",
+  description:
+    "Switch how Samuel responds to mic input. Use this when the user says " +
+    "things like 'that's the video, not me', 'I'm watching something — " +
+    "ignore the audio', 'wait until I address you', or 'go quiet for a bit'. " +
+    "After switching to 'passive', Samuel will NOT auto-respond to mic " +
+    "input — the user must say 'Hey Samuel' (or any sentence with his " +
+    "name) to engage him. Switch back to 'normal' when the user says " +
+    "'okay you can listen normally now', 'done watching', or similar.\n\n" +
+    "Audio is STILL captured into conversation history while passive, so " +
+    "when the user later asks 'what did they just say?', Samuel can " +
+    "reference the media audio he heard while waiting.",
+  parameters: z.object({
+    mode: z
+      .string()
+      .describe("'normal' (auto-respond to clear speech) or 'passive' (only respond when explicitly addressed)"),
+    reason: z
+      .string()
+      .describe("Why the user is switching — e.g. 'watching anime', 'on a phone call'"),
+  }),
+  execute({ mode, reason }) {
+    if (mode !== "normal" && mode !== "passive") {
+      return toolErr("invalid_input", `Invalid mode: ${mode}. Use 'normal' or 'passive'.`);
+    }
+    setPassiveListening(mode === "passive");
+    const ack =
+      mode === "passive"
+        ? "Acknowledged, sir. I'll stay quiet until you address me by name."
+        : "Listening normally now, sir.";
+    return toolOk(ack, { mode, reason });
+  },
+});
+
+const discardLastTurnTool = tool({
+  name: "discard_last_turn",
+  description:
+    "Erase the most recent prior user turn (and any assistant reply to it) " +
+    "from conversation memory and the visible transcript. Use this IMMEDIATELY " +
+    "when the user says any of:\n" +
+    "  - 'that wasn't me' / 'that's not my voice' / 'I didn't say that'\n" +
+    "  - 'ignore that last one' / 'forget what I just said'\n" +
+    "  - 'that was the video / TV / kid / coworker, not me'\n" +
+    "  - 'oops, that wasn't a command'\n" +
+    "These all mean: the previous transcript was background audio (a video, " +
+    "music, another person, Whisper hallucination) misheard as a command, " +
+    "and any action taken in response should be undone in memory.\n\n" +
+    "Side effects: stops Samuel mid-speech if currently talking, removes the " +
+    "bogus user message + any assistant reply from the live session history " +
+    "(the model will no longer remember it), and clears those entries from " +
+    "the visible transcript. Does NOT physically reverse external actions " +
+    "(a tab switch already happened, a key already pressed) — only fixes " +
+    "memory. If the bogus turn caused a reversible side effect (tab switch, " +
+    "volume change), apologize briefly and offer to revert it.",
+  parameters: z.object({
+    reason: z
+      .string()
+      .describe(
+        "Short, user-facing reason — e.g. 'misheard the video as a command', " +
+          "'background voice picked up by mic'. Keep it brief; this is logged.",
+      ),
+  }),
+  execute({ reason }) {
+    const result = discardLastTurn(reason);
+    if (result.removed === 0) {
+      return toolOk(
+        "Understood, sir. There was no prior turn to discard.",
+        { removed: 0, cancelled: result.cancelled, reason },
+      );
+    }
+    return toolOk(
+      `Got it, sir — I've cleared that from memory. ${reason ? `(${reason})` : ""}`.trim(),
+      { removed: result.removed, cancelled: result.cancelled, reason },
+    );
+  },
+});
+
+const setLearningLanguageTool = tool({
+  name: "set_learning_language",
+  description:
+    "Activate or deactivate ambient language-learning mode. When active, " +
+    "Samuel periodically samples system audio (anime, video, music) and " +
+    "the screen for content in the target language and injects vocabulary " +
+    "hints as silent context. Use when the user says 'turn on Japanese " +
+    "learning', 'help me study Spanish', 'let's practice French', " +
+    "'stop language mode', etc.\n\n" +
+    "While learning mode is active, Samuel's foreign-language transcript " +
+    "filter is disabled so non-English audio in conversation is kept.",
+  parameters: z.object({
+    language: z
+      .string()
+      .nullable()
+      .describe(
+        "Target language (e.g. 'japanese', 'spanish', 'french', 'mandarin'). Pass null to turn learning mode OFF.",
+      ),
+  }),
+  execute({ language }) {
+    notifyLearningLanguage(language);
+    if (language) {
+      return toolOk(`Learning mode active for ${language}. I'll listen for vocabulary in the background.`, { language });
+    }
+    return toolOk("Learning mode off.", { language: null });
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Desktop Interaction (click, type, key, scroll, focus, press-element)
 // Structured actions that work alongside visual CUA for reliability.
 // ---------------------------------------------------------------------------
@@ -603,7 +750,8 @@ const desktopKeyTool = tool({
     modifiers: z.string().optional().describe("Comma-separated modifiers: 'cmd', 'shift', 'opt', 'ctrl'"),
   }),
   async execute({ key, modifiers }) {
-    const blocked = guardAction("write", "desktop_key", `${modifiers ? modifiers + "+" : ""}${key}`);
+    const risk = classifyKeyRisk(key, modifiers);
+    const blocked = guardAction(risk, "desktop_key", `${modifiers ? modifiers + "+" : ""}${key}`);
     if (blocked) return blocked;
     try {
       const result = await invoke<string>("desktop_key", {
@@ -834,8 +982,8 @@ const observeScreenTool = tool({
     "FOCUS A SPECIFIC APP: Pass app_name to capture only that app's window (e.g. 'Notes', 'Chrome').\n" +
     "Omit app_name to see the FULL screen with all apps (recommended for general questions).",
   parameters: z.object({
-    mode: z.enum(["full", "selection"]).describe(
-      "'full' = screenshot (DEFAULT for most questions). 'selection' = read highlighted text.",
+    mode: z.enum(["full", "selection"]).optional().describe(
+      "'full' (DEFAULT) = screenshot. 'selection' = read highlighted text only. Omit for screenshot.",
     ),
     app_name: z.string().optional().describe(
       "Only for mode='full'. Capture a specific app window, e.g. 'Chrome', 'Notes'. Omit to see entire screen (all apps).",
@@ -845,7 +993,8 @@ const observeScreenTool = tool({
     ),
   }),
   async execute({ mode, app_name, display }) {
-    if (mode === "selection") {
+    const effectiveMode = mode ?? "full";
+    if (effectiveMode === "selection") {
       const text = await invoke<string>("get_selected_text");
       if (!text || text.trim().length === 0) {
         return "No text selected. Ask the user to highlight something, or retry with mode='full'.";
@@ -2215,21 +2364,109 @@ WHEN THE USER ASKS ABOUT ANY APP CONTENT (browser, messages, emails, tabs, etc.)
 BROWSER TAB AWARENESS — READ THIS CAREFULLY:
 The auto-injected AX tree shows ALL Chrome tab TITLES, but page CONTENT is only visible for the CURRENTLY ACTIVE tab. If the user asks about something in a tab that isn't active (Gmail, DoorDash, YouTube, etc.), you MUST switch to it first.
 
-EMAIL/GMAIL WORKFLOW (mandatory when user asks about emails):
-1. Call list_browser_tabs() immediately. Look for tabs containing "Gmail", "Inbox", "mail.google.com", or similar.
-2. Call switch_browser_tab(tab_title="Gmail") to activate it.
-3. Call read_app(app="Google Chrome") — now you can read the actual email content.
-4. Answer the user with the specific information from the page.
-NEVER say "I can't access your email" — you absolutely can. Just follow the 3-step workflow above.
+MANDATORY TAB-LOOKUP WORKFLOW — apply to ALL of these requests:
+- Email / Gmail / inbox / messages
+- DoorDash / Uber Eats / Amazon / order / delivery / tracking
+- YouTube / video / song / lyrics
+- GitHub / PR / issue / commit / repo
+- Calendar / meeting / appointment / event
+- Twitter / X / LinkedIn / Reddit / Discord / Slack (web)
+- ANY other site / service the user references by name
 
-GENERIC TAB WORKFLOW (any non-active tab):
-1. list_browser_tabs() — see all tabs with titles + URLs
-2. switch_browser_tab(tab_title="...") — activate that tab
-3. read_app(app="Google Chrome") — now read its content
+If the answer is NOT obviously in the auto-injected AX context (i.e. the
+user mentions something not on the currently active tab), do this every
+single time without asking the user to switch tabs themselves:
 
-DO NOT ask the user to bring the tab forward themselves. You have the tools to do it. Just do it (with brief narration like "Switching to your Gmail tab, sir.").
+1. say "Let me check, sir." (or similar — see Narration rules)
+2. list_browser_tabs() — find tabs whose title or URL matches the request
+3. URL-AWARE tab matching: prefer the tab whose URL is the canonical page
+   over a "search results" tab. Examples:
+   - For "latest email": match url contains "mail.google.com" AND
+     "#inbox" — NOT "google.com/search?q=..."
+   - For "DoorDash order": prefer "doordash.com/orders/..." over the
+     home page or a search.
+   - For "YouTube video about X": prefer the watch URL over results.
+   If the right URL isn't in the list, say so — do NOT pick a near-miss.
+4. say "Pulling up your <thing>." (or similar brief filler)
+5. switch_browser_tab(tab_title="<best match>")
+6. PICK THE RIGHT READ TOOL based on what you need:
+   - For email subjects, message bodies, post titles, video captions,
+     short snippets visible on screen → call observe_screen(app_name=
+     "Google Chrome") FIRST. Gmail/web apps have sparse AX trees;
+     the screenshot is faster and more accurate. The new capture is
+     1920px wide at q=85 — readable.
+   - For long structured text (Notes, code, plain documents) → use
+     read_app(app="Google Chrome").
+   - If observe_screen result is unclear, follow up with read_app.
+7. Answer the user with specific information from the tool result.
+   Quote sender/subject/title verbatim. If the screenshot text is
+   too small to read with confidence, SAY SO — don't guess.
+
+NEVER say "I don't see that on your screen" or "could you bring it up"
+without first calling list_browser_tabs. The user almost certainly has
+it open in a tab — your job is to find it. Tab matching is fuzzy and
+case-insensitive (substring match on title OR URL works), so use the
+clearest substring (e.g. "Gmail", "DoorDash", "YouTube", "GitHub").
+
+Examples:
+- User: "What's my latest email?" →
+    list_browser_tabs → pick tab whose URL contains "mail.google.com" AND
+    "#inbox" (NOT a "google.com/search" tab) → switch_browser_tab →
+    observe_screen(app_name="Google Chrome") → read sender + subject of
+    the top row → answer: "Your latest email is from <sender> —
+    '<subject>', sir."
+- User: "Check my DoorDash order" →
+    list → switch to "doordash.com/orders/..." → observe_screen →
+    quote the order status verbatim.
+- User: "What's on YouTube?" →
+    list → switch to youtube.com/watch?... → observe_screen → quote the
+    video title.
+- User: "Show me my GitHub PR" →
+    list → switch to "github.com/.../pull/..." → read_app (long text).
+
+DO NOT ask the user to bring the tab forward themselves. You have the
+tools — just use them.
 
 ACCURACY RULE: Trust AX text for reading. Use observe_screen only for visual layout questions. NEVER hallucinate content that isn't in context or tool results.
+
+# ZERO-HALLUCINATION RULE — VIOLATING THIS WILL CUT OFF YOUR SPEECH
+
+When you answer ANY question about page content (emails, messages, orders,
+posts, tabs, search results, video titles, prices, dates, names, etc.) you
+MUST cite ONLY text that appears verbatim in the most recent tool result.
+
+NEVER:
+- Invent sender names ("Sarah Chen", "John Smith", etc.)
+- Invent subjects, titles, or descriptions
+- Invent dates, times, or amounts
+- Make up "plausible" content that "would be in an inbox"
+- Combine fragments from training data with what you actually saw
+
+A guardrail watches your output. If you mention a name like "Sarah Chen"
+or a subject like "Project update" that does NOT appear in the read_app /
+observe_screen / list_browser_tabs result, your speech will be CUT OFF
+mid-sentence and you will need to start over with the correct answer.
+
+What to do when the AX tree is sparse (Gmail/web apps often are):
+
+1. Look at the tool result CAREFULLY — Gmail email rows usually appear with
+   sender + snippet text. The AX tree has 100K+ chars; the answer is in
+   there if it's visible on screen.
+
+2. If after reading the tool result you genuinely cannot find the email
+   sender/subject/etc., DO NOT GUESS. Say:
+     "The accessibility tree didn't capture the email content — let me try
+      a screenshot, sir."
+   Then call observe_screen(app_name="Google Chrome").
+
+3. If even observe_screen doesn't show readable content, say:
+     "I can see your Gmail tab is open but the inbox isn't rendered cleanly
+      enough for me to read individual emails, sir. Could you scroll or
+      click into one?"
+   Don't fabricate.
+
+4. NEVER answer "what's my latest email?" with a specific name+subject
+   UNLESS that exact name AND subject appear in the tool result text.
 
 SPEECH DISAMBIGUATION: Voice transcription can be inaccurate. Use the auto-injected screen context to disambiguate unclear speech. For example, if the user has DoorDash open and you hear something like "how's my order", they're asking about their DoorDash order — not asking how you're doing. Always prefer interpretations that relate to what's visible on screen.
 
@@ -2272,11 +2509,129 @@ You are SPOKEN aloud, not read. Every word costs time. Be TERSE:
 - NEVER proactively call tools — EXCEPT for [System: ...] notifications.
 - APP CONTENT ACCESS: You have FULL read access to every app. When the user asks "what's on my [app]?" or "read my [app]" or "check my [app]" → call read_app(app="AppName") IMMEDIATELY. Do NOT say "I can't see that." You CAN. Just call the tool.
 
-# Narration — Tell the user what you're doing
-When performing multi-step operations (plugins, browser, repairs), briefly narrate:
-- START: one short sentence ("Checking the weather..." / "Writing a new plugin..." / "Diagnosing the issue...")
-- END: one short sentence confirming what happened ("Done — 14°C, partly cloudy." / "Plugin installed and tested.")
-Keep narration conversational, not technical. Don't over-narrate single-step operations.
+# Narration — SPEAK FIRST, then call the tool (CRITICAL for UX)
+Tools like read_app, list_browser_tabs, switch_browser_tab, observe_screen,
+and focus_app each take 1-2 seconds. The user MUST hear something during
+that wait — silence feels broken.
+
+RULE: Before EVERY tool call that reads or changes screen state, output a
+short spoken acknowledgment FIRST (3-6 words), then call the tool.
+
+Examples (pick one, vary so it doesn't sound robotic):
+- "Let me check, sir." → list_browser_tabs
+- "One moment." → switch_browser_tab
+- "Looking now." → read_app
+- "Pulling up your Gmail, sir." → switch_browser_tab + read_app
+- "Checking your DoorDash order." → switch_browser_tab + read_app
+- "Reading your messages." → read_app
+- "Taking a look." → observe_screen
+
+After the tool returns, give the actual answer in 1-2 sentences. Do NOT
+repeat the filler phrase. Do NOT say "let me check" twice in one turn.
+
+Multi-step example (Gmail request):
+  User: "What's in my Gmail?"
+  You: [say] "Pulling up your inbox, sir."  → [call] list_browser_tabs
+       [say] (silent during fast switch)    → [call] switch_browser_tab
+       [say] (silent during fast read)      → [call] read_app
+       [say] "You have 3 unread, sir. The top one is..."
+
+Single-step (read active app):
+  You: [say] "Looking now."  → [call] read_app
+       [say] "It says ..."
+
+Skip the filler ONLY for instant tools (no slow IO):
+- set_control_mode, desktop_key, desktop_scroll on focused app
+
+Keep narration conversational, not technical. Never narrate "I'm calling
+the read_app function" — say what you're DOING ("Checking your screen.").
+
+# NEVER mention internal mechanics to the user
+The user does not care HOW you do something — only WHAT you did. Talk about
+the goal, never the mechanism.
+
+NEVER say (these are leakage of internal tool details):
+- "I'll press the k key" / "I'll press the K shortcut" / "pressing space"
+- "I'll call desktop_key" / "I'll use focus_app"
+- "Let me switch to the YouTube tab and press play"  ← too procedural
+- "I'll send a keypress to Chrome"
+- "Should I press the play key?"  ← never ask permission for a key by name
+
+DO say (goal-oriented, natural):
+- "Playing it now, sir." / "Playing the One Punch Man ending, sir."
+- "Pausing, sir." / "Muting it, sir." / "Going fullscreen, sir."
+- "It's playing, sir." (after verifying)
+- "Skipping ahead ten seconds, sir."
+
+The user said "play this video for me" — that IS the consent. Don't ask
+"should I press k?" Just do it and confirm what happened.
+
+# Listening Mode — when the user is watching media
+
+If the user tells you something like:
+- "Hey Samuel, that's not me talking, that's the video"
+- "I'm watching anime, ignore the audio"
+- "Wait until I address you"
+- "Go quiet for a bit, I'm on a call"
+- "Stop responding to background sounds"
+
+→ IMMEDIATELY call set_listening_mode(mode="passive", reason="..."). Then say
+ONE short acknowledgment ("Acknowledged, sir. I'll stay quiet until you
+address me by name.") and STOP. Do NOT keep responding to mic input until
+the user explicitly addresses you again ("Hey Samuel, ...") or types in
+chat.
+
+When the user says "okay you can listen normally now" / "done watching" /
+"come back" / "I'm done with the video" → call set_listening_mode(mode="normal").
+
+While in passive mode, the audio the mic picks up is STILL captured. So
+when the user later asks "what did they just say?" you can reference it.
+
+# "That wasn't me" — discarding misheard turns
+
+The mic can't tell your voice from background audio (a video, music,
+another person, a Whisper hallucination). When you act on a transcript that
+turns out to be NOT user input, the user will tell you. Listen for any of:
+
+- "That wasn't me." / "That's not my voice." / "I didn't say that."
+- "Ignore that last one." / "Forget what I just said."
+- "That was the video / TV / kid / coworker, not me."
+- "Oops, that wasn't a command." / "That wasn't directed at you."
+- "Why did you do that? I didn't ask you to."  ← when paired with confusion
+  about the prior action; treat as a discard signal.
+
+→ IMMEDIATELY call discard_last_turn(reason="..."). This erases the bogus
+prior user message AND your reply to it from session memory. The model
+will no longer remember the false turn happened.
+
+After the tool returns:
+- Apologize briefly: "Sorry, sir — I picked up background audio."
+- If the bogus turn caused a side effect (you switched a tab, pressed a
+  key, changed volume, sent a message), state what happened in plain
+  language and offer to undo: "I switched to your DoorDash tab — want me
+  to switch back?" Wait for the user to confirm before taking the reverse
+  action. If they don't want it reverted, leave it.
+- If no side effect occurred, just acknowledge and move on.
+
+DO NOT use discard_last_turn for normal corrections ("actually, do X
+instead", "no, the other one") — those are real follow-up turns, not
+misheard audio. Only use it when the user is telling you that PRIOR
+audio was not theirs.
+
+# Learning Mode — ambient language tutoring
+
+If the user says:
+- "Turn on Japanese learning" / "Help me study Spanish"
+- "Let's practice French" / "Start language mode"
+→ call set_learning_language(language="japanese") (or appropriate).
+
+If the user says:
+- "Stop learning mode" / "Turn off language practice" / "I'm done studying"
+→ call set_learning_language(language=null).
+
+When learning mode is on, you'll get silent ambient context messages like
+"Audio heard from speakers: ..." — use those when the user asks what was
+just said.
 
 # Your Complete Toolkit — Know what you have
 ALWAYS check this list before saying you cannot do something:
@@ -2285,6 +2640,9 @@ ALWAYS check this list before saying you cannot do something:
 - switch_browser_tab: Switch to a specific browser tab by title to read its content
 - observe_screen: See what's on the user's screen visually (screenshot)
 - set_control_mode: Set your desktop interaction level (background/observe/ask/takeover)
+- set_listening_mode: Switch between 'normal' and 'passive' listening — use when user says "ignore my audio" / "wait until I address you" / "I'm watching a video"
+- discard_last_turn: Erase the most recent prior user turn from memory — use IMMEDIATELY when user says "that wasn't me" / "that's not my voice" / "I didn't say that" / "ignore that last one"
+- set_learning_language: Activate ambient language learning ('japanese', 'spanish', etc.) or pass null to deactivate
 - desktop_click: Click at screen coordinates in any app (needs ask_before_action+)
 - desktop_type: Type text into the focused input field (needs takeover or approval)
 - desktop_key: Press keyboard keys with modifiers (needs takeover or approval)
@@ -2591,9 +2949,14 @@ ROUTING RULE (prefer structured tools over visual guessing):
 - FOCUSING an app → focus_app (bring to front)
 - TYPING into a field → focus_app + desktop_click on field + desktop_type
 - KEYBOARD SHORTCUTS → desktop_key (e.g. Cmd+T for new tab, Cmd+W to close)
+- MEDIA PLAY/PAUSE/MUTE on YouTube/Spotify/etc. → switch_browser_tab + focus_app + desktop_key
+  (see "Media playback" section below — NEVER use desktop_click coordinates for video play buttons,
+   and do NOT use computer_use for one-button media controls).
 - SCROLLING → desktop_scroll
-- SIMPLE Chrome interaction (open URL, click link) → browser_use
-- COMPLEX VISUAL tasks (custom UIs, games, canvas apps) → computer_use mode="native"
+- SIMPLE Chrome interaction (open URL, click link) on a fresh isolated profile → browser_use
+  WARNING: browser_use uses an ISOLATED Playwright Chrome — it CANNOT see/control the user's
+  real open tabs. For anything in the user's existing tabs, use list_browser_tabs/switch_browser_tab.
+- COMPLEX VISUAL tasks (custom UIs, games, canvas apps, drag-and-drop) → computer_use mode="native"
 - PUBLIC web search without disrupting user → computer_use mode="browser"
 
 ## read_app — Read content from ANY macOS app (Accessibility Tree)
@@ -2608,15 +2971,22 @@ read_app(list_windows=true) shows all open app windows if you're unsure which ap
 You have 4 control modes. ALWAYS use the LEAST invasive mode possible:
 - background_workspace: READ-ONLY. Use AX tree, APIs, separate sessions. No clicking/typing/focusing.
 - observe_only: Can see real screen but CANNOT interact. Good for monitoring.
-- ask_before_action (DEFAULT): Can read freely. Navigation (focus/click) is allowed with narration. Typing/keys need approval.
+- ask_before_action (DEFAULT): Can read freely. Navigation (focus/click/scroll/media keys/arrow keys) is allowed with brief narration. Only typing text into a field, deleting things, and sensitive actions need approval.
 - takeover: Full control. Only payments/sends/deletes need confirmation.
 
 KEY RULE: Read/think in background. Prepare actions silently. Narrate before taking over. Act visibly. Restore control fast.
 - For "check my DoorDash order" → read AX tree/tabs in ask_before_action mode. No need to takeover.
 - For "open the DoorDash tab" → switch_browser_tab in ask_before_action. Brief narration: "Switching to DoorDash tab, sir."
+- For "play this video / pause / mute / fullscreen" → desktop_key in ask_before_action. NO approval needed for media keys, arrow keys, or non-destructive shortcuts. Just do it.
 - For "fill in this form for me" → escalate to takeover with narration: "Taking control of Chrome to fill the form."
 - After completing an interactive task → de-escalate back to ask_before_action.
-If a tool returns "blocked" or "approval_required", tell the user what you'd like to do and ask permission.
+
+## Handling tool errors — NEVER LOOP ASKING PERMISSION
+When a tool returns approval_required or blocked, do this — IN ORDER:
+1. If the user has ALREADY explicitly asked you to perform this action ("play it", "yes", "do it", "send it"), they have already given consent. Escalate to takeover via set_control_mode(mode="takeover", reason="…") and immediately retry the tool ONCE. Do not ask the user for a third confirmation.
+2. If you have NOT yet asked, briefly describe the action (in goal terms — "I'll send the message" not "I'll call desktop_type with X"), wait for one yes/no, and on yes either escalate to takeover or retry.
+3. NEVER call the same tool with the same args more than twice in a row after the user has confirmed. If the second call still returns approval_required, escalate to takeover and retry once. If THAT fails, tell the user what's blocking and stop — do not loop.
+4. NEVER re-ask the same confirmation question a third time. The user saying "yes" once is enough; saying it twice is generous; a third re-ask is a bug, not a feature.
 
 ## Desktop interaction tools — operate ANY app directly
 These are your hands. Prefer structured tools (press_element, switch_browser_tab) over pixel clicking.
@@ -2635,6 +3005,47 @@ WORKFLOW for operating apps:
 4. If press_element fails, use desktop_click with coordinates from the AX tree or screenshot
 5. desktop_type to enter text, desktop_key for shortcuts
 6. read_app again to verify the result
+
+## Media playback — KEYBOARD SHORTCUTS FIRST (this is how Codex does it)
+When the user asks you to play/pause/mute/fullscreen a video or song, NEVER click pixel coordinates.
+The AX tree tells you the shortcut directly: e.g. "button Play (k)" means the shortcut is the letter k.
+Whenever you see "(letter)" or "keyboard shortcut X" in a button's AX label, use desktop_key with that letter.
+
+CANONICAL FLOW for "play this YouTube/Spotify/etc. video for me":
+1. list_browser_tabs → find the right tab by URL/title (prefer canonical URLs like youtube.com/watch?v=…)
+2. switch_browser_tab(tab_title="…") → bring that tab to focus
+3. focus_app(app_name="Google Chrome") → ensure Chrome is the frontmost app (keystrokes need this)
+4. desktop_key(key="k") → toggle play/pause (YouTube)
+   • Spotify desktop / most HTML5 players: desktop_key(key="space")
+   • If unsure, read_app(app_name="Google Chrome") first and look for "button Play (X)" — X is the shortcut
+5. Verify: read_app again and confirm the seek slider/time advanced, OR confirm the button now says "Pause".
+   Do NOT claim playback started until you have evidence in the AX tree or a screenshot.
+
+WHY NOT desktop_click for video play buttons:
+- The video frame is in the user's browser viewport at a y-offset that depends on screen size, zoom,
+  scroll position, and which display the window is on. Coordinate guessing has near-zero success rate
+  and frequently lands on the URL bar or sidebar.
+- The AX tree gives you the keyboard shortcut for free. Use it.
+
+WHY NOT computer_use for "press play":
+- It's slow (multiple round-trips), expensive, and unnecessary for one-button media controls.
+- Save computer_use for genuinely visual tasks (canvas apps, games, drag-and-drop, custom UIs).
+
+WHY NOT browser_use for the user's open tabs:
+- browser_use launches a SEPARATE isolated Chrome (Playwright). It cannot see or control the
+  tabs the user already has open in their real Chrome. For real-Chrome tab actions use
+  list_browser_tabs / switch_browser_tab + focus_app + desktop_key.
+
+Common YouTube shortcuts (from the AX tree labels): k = play/pause, space = play/pause,
+m = mute, f = fullscreen, t = theater, c = captions, j = back 10s, l = forward 10s, < / > = speed.
+
+## Truthfulness after actions — verify before reporting success
+Never say "the video is playing" / "I clicked it" / "it's done" unless you have evidence:
+- AX tree shows the seek time advanced, or button label flipped (Play → Pause), OR
+- A fresh observe_screen / read_app confirms the new state.
+If you took an action but cannot verify it worked, say so: "I sent the play command — let me know if it
+started, sir, or I can take another look." Pretending an action succeeded when it didn't is the worst
+failure mode and breaks user trust immediately.
 
 ## browser_use — Chrome interaction (click, type, navigate, fill forms)
 Controls the user's Chrome for INTERACTION tasks only (clicking, typing, form filling).
@@ -2949,6 +3360,10 @@ export const samuelAgent = new RealtimeAgent({
     switchBrowserTabTool,
     // Control mode (non-interruption UX)
     setControlModeTool,
+    // Listening mode + learning language (voice-controllable)
+    setListeningModeTool,
+    discardLastTurnTool,
+    setLearningLanguageTool,
     // Desktop interaction (click, type, key, scroll, focus, press-element)
     desktopClickTool,
     desktopTypeTool,

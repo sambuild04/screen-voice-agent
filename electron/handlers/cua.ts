@@ -46,19 +46,17 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 		model: "gpt-5.5",
 		tools: [
 			{
-				type: "computer",
-				computer: {
-					display_width: VIEWPORT_W,
-					display_height: VIEWPORT_H,
-					environment: "browser",
-				},
+				type: "computer_use_preview",
+				display_width: VIEWPORT_W,
+				display_height: VIEWPORT_H,
+				environment: "browser",
 			},
 		],
 		input: [
 			{
 				role: "user",
 				content: [
-					{ type: "text", text: task },
+					{ type: "input_text", text: task },
 					{
 						type: "input_image",
 						image_url: `data:image/png;base64,${initSs}`,
@@ -69,6 +67,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 		],
 		reasoning: { effort: "medium" },
 		max_output_tokens: 2048,
+		truncation: "auto",
 	};
 
 	let resp = await callResponsesApi(apiKey, firstBody);
@@ -110,12 +109,10 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 			model: "gpt-5.5",
 			tools: [
 				{
-					type: "computer",
-					computer: {
-						display_width: VIEWPORT_W,
-						display_height: VIEWPORT_H,
-						environment: "browser",
-					},
+					type: "computer_use_preview",
+					display_width: VIEWPORT_W,
+					display_height: VIEWPORT_H,
+					environment: "browser",
 				},
 			],
 			previous_response_id: prevRespId,
@@ -132,6 +129,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 			],
 			reasoning: { effort: "medium" },
 			max_output_tokens: 2048,
+			truncation: "auto",
 		};
 
 		resp = await callResponsesApi(apiKey, followBody);
@@ -177,19 +175,17 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 			model: "gpt-5.5",
 			tools: [
 				{
-					type: "computer",
-					computer: {
-						display_width: NATIVE_W,
-						display_height: screenshotH,
-						environment: "mac",
-					},
+					type: "computer_use_preview",
+					display_width: NATIVE_W,
+					display_height: screenshotH,
+					environment: "mac",
 				},
 			],
 			input: [
 				{
 					role: "user",
 					content: [
-						{ type: "text", text: task },
+						{ type: "input_text", text: task },
 						{
 							type: "input_image",
 							image_url: `data:image/jpeg;base64,${initSs}`,
@@ -200,6 +196,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 			],
 			reasoning: { effort: "medium" },
 			max_output_tokens: 2048,
+			truncation: "auto",
 		};
 
 		let resp = await callResponsesApi(apiKey, firstBody);
@@ -243,12 +240,10 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 				model: "gpt-5.5",
 				tools: [
 					{
-						type: "computer",
-						computer: {
-							display_width: NATIVE_W,
-							display_height: screenshotH,
-							environment: "mac",
-						},
+						type: "computer_use_preview",
+						display_width: NATIVE_W,
+						display_height: screenshotH,
+						environment: "mac",
 					},
 				],
 				previous_response_id: prevRespId,
@@ -265,6 +260,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 				],
 				reasoning: { effort: "medium" },
 				max_output_tokens: 2048,
+				truncation: "auto",
 			};
 
 			resp = await callResponsesApi(apiKey, followBody);
