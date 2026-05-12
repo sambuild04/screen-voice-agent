@@ -1,2 +1,0 @@
-# Compiled Swift helper — rebuild with: swiftc -o record-audio record-audio.swift -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
-record-audio
