@@ -6,17 +6,16 @@ Drop your skill files here via PR. A skill is a markdown file that teaches Samue
 
 ```markdown
 ---
-title: "Fix lyrics from web"
-trigger: "User says lyrics are wrong, inaccurate, or garbled"
-summary: "Searches the web for correct lyrics, compares with current, and fixes differences"
+title: "Annotate article with furigana"
+trigger: "User asks for furigana on every Japanese name in an article"
+summary: "Reads the page, extracts proper nouns, and adds furigana annotations"
 ---
 
-1. `song_control(action="refetch")` to search the web for better lyrics
-2. If refetch finds lyrics, compare line-by-line with current lyrics
-3. Use `song_control(action="correct", corrections=[...])` to fix mismatched lines
-4. If refetch fails, `web_browse(action="search", query="<song title> lyrics")`
-5. `web_browse(action="read", url=<best result>)` to get the page
-6. Extract lyrics and use `song_control(action="push_lyrics", ...)` to display them
+1. `web_browse(action="read", url=<current article URL>)` to get the page text
+2. Scan for Japanese proper nouns (people/places); skip ones already annotated
+3. Look up readings via your own knowledge or `web_browse(action="search", query="<name> 読み方")`
+4. `show_content(action="show", title="Annotated article", html=...)` with each name as `<ruby>`
+5. Save the workflow with `skill_manage(action="save", ...)` for next time
 ```
 
 ## Guidelines

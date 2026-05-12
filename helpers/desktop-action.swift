@@ -261,6 +261,92 @@ func pressElement(appName: String, description: String) -> Bool {
     return found
 }
 
+// MARK: - Frontmost App / User Activity
+
+// Returns the localized name of the currently frontmost app (the one
+// receiving keyboard input). Used by the focus guard to make sure the
+// FALLBACK desktop_* path isn't about to send keystrokes into the wrong
+// window because the user moved on.
+func frontmostApp() -> String? {
+    return NSWorkspace.shared.frontmostApplication?.localizedName
+}
+
+// Seconds since the user last touched mouse, keys, or moved the pointer.
+// Combines keyDown / mouseMoved / leftMouseDown — that covers the cases we
+// care about (typing, clicking, navigating). Wheel-only / trackpad-gesture
+// activity may be ignored, which is acceptable; we only use this to decide
+// whether to give a takeover preamble.
+func secondsSinceLastUserInput() -> Double {
+    let stateID = CGEventSourceStateID.combinedSessionState
+    let keyDown = CGEventSource.secondsSinceLastEventType(stateID, eventType: .keyDown)
+    let mouseMoved = CGEventSource.secondsSinceLastEventType(stateID, eventType: .mouseMoved)
+    let mouseClick = CGEventSource.secondsSinceLastEventType(stateID, eventType: .leftMouseDown)
+    return min(keyDown, mouseMoved, mouseClick)
+}
+
+// MARK: - AX Type (programmatic value-set, no keyboard takeover)
+
+// Returns:
+//   0 = ok
+//   1 = app not found
+//   2 = element not found
+//   3 = AXSetValue rejected by the app (some Electron / web fields refuse)
+func setValueOnElement(appName: String, description: String, text: String) -> Int {
+    guard let (pid, _) = findApp(appName) else {
+        return 1
+    }
+
+    let appRef = AXUIElementCreateApplication(pid)
+    let lowerDesc = description.lowercased()
+
+    var queue: [AXUIElement] = [appRef]
+    var visited = 0
+    let maxVisit = 3000
+    let startTime = Date()
+
+    while !queue.isEmpty && visited < maxVisit && Date().timeIntervalSince(startTime) < 5.0 {
+        let element = queue.removeFirst()
+        visited += 1
+
+        let role = getStringAttr(element, kAXRoleAttribute as String) ?? ""
+        let title = getStringAttr(element, kAXTitleAttribute as String) ?? ""
+        let desc = getStringAttr(element, kAXDescriptionAttribute as String) ?? ""
+        let placeholder = getStringAttr(element, kAXPlaceholderValueAttribute as String) ?? ""
+
+        // Only target text-acceptable roles. Skip read-only displays,
+        // buttons, etc., even if their label happens to match.
+        let isTextRole = role == (kAXTextFieldRole as String)
+            || role == (kAXTextAreaRole as String)
+            || role == (kAXComboBoxRole as String)
+            || role == "AXSearchField"
+
+        let labelMatch = title.lowercased().contains(lowerDesc)
+            || desc.lowercased().contains(lowerDesc)
+            || placeholder.lowercased().contains(lowerDesc)
+
+        if isTextRole && labelMatch {
+            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+            if result == .success {
+                print("OK: AXSetValue on \(role) — \(title.isEmpty ? (desc.isEmpty ? placeholder : desc) : title)")
+                return 0
+            }
+            // Try focusing first, then re-set — some apps require focus
+            _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            let retry = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFTypeRef)
+            if retry == .success {
+                print("OK: AXSetValue on \(role) (after focus) — \(title.isEmpty ? (desc.isEmpty ? placeholder : desc) : title)")
+                return 0
+            }
+            return 3
+        }
+
+        for child in getChildren(element) {
+            queue.append(child)
+        }
+    }
+    return 2
+}
+
 func findApp(_ name: String) -> (pid_t, String)? {
     let workspace = NSWorkspace.shared
     for app in workspace.runningApplications {
@@ -371,8 +457,48 @@ case "press-element":
         exit(1)
     }
 
+case "frontmost-app":
+    if let name = frontmostApp() {
+        print(name)
+    } else {
+        print("UNKNOWN")
+        exit(1)
+    }
+
+case "user-activity":
+    let secs = secondsSinceLastUserInput()
+    // Print a single integer (seconds) — Swift double formatting keeps it simple.
+    print(String(format: "%.1f", secs))
+
+case "ax-type":
+    guard args.count >= 4 else {
+        fputs("Usage: desktop-action ax-type \"App Name\" \"element description\" \"text\"\n", stderr)
+        exit(1)
+    }
+    let appName = args[1]
+    let elementDesc = args[2]
+    let text = args[3...].joined(separator: " ")
+    let code = setValueOnElement(appName: appName, description: elementDesc, text: text)
+    switch code {
+    case 0:
+        // already printed OK above
+        break
+    case 1:
+        print("APP_NOT_FOUND: \(appName)")
+        exit(1)
+    case 2:
+        print("NOT_FOUND: No text field matching '\(elementDesc)' in \(appName)")
+        exit(1)
+    case 3:
+        print("REJECTED: AXSetValue refused by \(appName) (likely Electron / web field that needs real keystrokes)")
+        exit(1)
+    default:
+        print("ERROR: Unknown ax-type result code \(code)")
+        exit(1)
+    }
+
 default:
     fputs("ERROR: Unknown command '\(command)'\n", stderr)
-    fputs("Commands: click, double-click, right-click, type, key, scroll, focus, press-element\n", stderr)
+    fputs("Commands: click, double-click, right-click, type, key, scroll, focus, press-element, ax-type, frontmost-app, user-activity\n", stderr)
     exit(1)
 }

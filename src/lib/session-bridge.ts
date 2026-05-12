@@ -1,7 +1,18 @@
 /**
  * Bridge between the RealtimeSession transport and tool functions.
- * Allows tools (samuel.ts) to inject images directly into the
- * active Realtime conversation without a separate Vision API call.
+ *
+ * Four distinct injection helpers exist on purpose; each has a different
+ * delivery shape and the callers depend on the difference. Keep them
+ * separate even though they look similar:
+ *   sendTextToSession    — user-role text, triggers `response.create`.
+ *   sendTextAndRespond   — system-style text, triggers `response.create`.
+ *   sendSilentContext    — system-style text, NO response trigger.
+ *   injectCorrection     — system message biasing the *next* turn (Reflexion).
+ *
+ * NOTE: A `sendAudioClip` PCM16 helper used to live here for piping system
+ * audio directly into the Realtime session. It was removed in commit
+ * dea376f because the model misidentified the spoken language. Re-introduce
+ * only after the language-confusion problem is solved.
  */
 
 type SendImageFn = (base64Jpeg: string) => void;
@@ -11,18 +22,11 @@ type RecordingActionFn = (action: "start" | "stop" | "processing" | "analyze" | 
 type LearningLanguageFn = (language: string | null) => void;
 type SendSilentContextFn = (text: string) => void;
 type SendTextAndRespondFn = (text: string) => void;
-type SendAudioClipFn = (pcmBase64: string, contextText?: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
 type SetVolumeFn = (pct: number) => void;
 type SetPassiveListeningFn = (passive: boolean) => void;
 type DiscardLastTurnFn = (reason: string) => { removed: number; cancelled: boolean };
-
-/** Shared content line type used by lyrics, song teaching, etc. */
-export interface ContentLine {
-  text: string;
-  timestamp: number | null;
-  source_index: number;
-}
+type InjectCorrectionFn = (lesson: string) => void;
 
 let sendImageFn: SendImageFn | null = null;
 let sendTextFn: SendTextFn | null = null;
@@ -31,14 +35,36 @@ let recordingActionFn: RecordingActionFn | null = null;
 let learningLanguageFn: LearningLanguageFn | null = null;
 let sendSilentContextFn: SendSilentContextFn | null = null;
 let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
-let sendAudioClipFn: SendAudioClipFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
 let setVolumeFn: SetVolumeFn | null = null;
 let setPassiveListeningFn: SetPassiveListeningFn | null = null;
 let discardLastTurnFn: DiscardLastTurnFn | null = null;
+let injectCorrectionFn: InjectCorrectionFn | null = null;
 
 export function registerDiscardLastTurn(fn: DiscardLastTurnFn | null) {
   discardLastTurnFn = fn;
+}
+
+export function registerInjectCorrection(fn: InjectCorrectionFn | null) {
+  injectCorrectionFn = fn;
+}
+
+/**
+ * Inject a freshly-recorded correction into the live session as a system
+ * message so the model applies it on the very next turn (Reflexion in-session
+ * loop). Persisted corrections are also written to disk and re-applied on
+ * future sessions via the system prompt prefix.
+ *
+ * Uses `conversation.item.create` with role: "system" rather than
+ * `session.update({instructions})` because the latter has a known reliability
+ * bug in the current Realtime API where instruction changes can be silently
+ * ignored mid-session. System messages on the conversation timeline always
+ * land.
+ */
+export function injectCorrection(lesson: string): boolean {
+  if (!injectCorrectionFn) return false;
+  injectCorrectionFn(lesson);
+  return true;
 }
 
 /**
@@ -167,155 +193,6 @@ export function sendTextAndRespond(text: string): boolean {
   return true;
 }
 
-export function registerSendAudioClip(fn: SendAudioClipFn | null) {
-  sendAudioClipFn = fn;
-}
-
-/**
- * Inject a PCM16 24kHz audio clip directly into the Realtime session so the
- * model can *hear* it (e.g. system audio from anime/games). Optional context
- * text is injected alongside so Samuel knows where the audio came from.
- */
-export function sendAudioClip(pcmBase64: string, contextText?: string): boolean {
-  if (!sendAudioClipFn) return false;
-  sendAudioClipFn(pcmBase64, contextText);
-  return true;
-}
-
-
-// ---------------------------------------------------------------------------
-// Song Playback bridge
-// ---------------------------------------------------------------------------
-
-type PlaySongLinesFn = (fromLine: number, toLine: number) => Promise<void>;
-type PauseSongFn = () => void;
-let playSongLinesFn: PlaySongLinesFn | null = null;
-let pauseSongFn: PauseSongFn | null = null;
-
-export function registerSongPlayback(
-  play: PlaySongLinesFn | null,
-  pause: PauseSongFn | null,
-) {
-  playSongLinesFn = play;
-  pauseSongFn = pause;
-}
-
-/** Called by Samuel's play_song_lines tool. Lines are 1-indexed. Returns when segment ends. */
-export async function playSongLines(fromLine: number, toLine: number): Promise<void> {
-  await playSongLinesFn?.(fromLine, toLine);
-}
-
-/** Called by Samuel's pause_song tool. */
-export function pauseSong() {
-  pauseSongFn?.();
-}
-
-// ---------------------------------------------------------------------------
-// Lyrics Viewer bridge
-// ---------------------------------------------------------------------------
-
-type ToggleLyricsFn = (visible: boolean) => void;
-let toggleLyricsFn: ToggleLyricsFn | null = null;
-
-export function registerToggleLyrics(fn: ToggleLyricsFn | null) {
-  toggleLyricsFn = fn;
-}
-
-export function toggleLyricsView(visible: boolean): boolean {
-  if (!toggleLyricsFn) return false;
-  toggleLyricsFn(visible);
-  return true;
-}
-
-type SetLyricsContentFn = (title: string, lines: string[]) => void;
-let setLyricsContentFn: SetLyricsContentFn | null = null;
-
-export function registerSetLyricsContent(fn: SetLyricsContentFn | null) {
-  setLyricsContentFn = fn;
-}
-
-/** Push arbitrary lyrics text into the viewer (e.g. from a web search). */
-export function setLyricsContent(title: string, lines: string[]): boolean {
-  if (!setLyricsContentFn) return false;
-  setLyricsContentFn(title, lines);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Song lyrics source tracking + hot-swap
-// ---------------------------------------------------------------------------
-
-// ContentLine is now defined at the top of this file
-type UpdateSongLinesFn = (lines: ContentLine[]) => void;
-type GetSongMetaFn = () => { title: string | null; source: string | null; videoId: string | null; lines: ContentLine[] };
-
-let updateSongLinesFn: UpdateSongLinesFn | null = null;
-let getSongMetaFn: GetSongMetaFn | null = null;
-
-export function registerUpdateSongLines(fn: UpdateSongLinesFn | null) {
-  updateSongLinesFn = fn;
-}
-
-export function registerGetSongMeta(fn: GetSongMetaFn | null) {
-  getSongMetaFn = fn;
-}
-
-/** Replace the current song lyrics in-place (hot-swap). */
-export function updateSongLines(lines: ContentLine[]): boolean {
-  if (!updateSongLinesFn) return false;
-  updateSongLinesFn(lines);
-  return true;
-}
-
-/** Get metadata + current lines for the loaded song. */
-export function getSongMeta(): { title: string | null; source: string | null; videoId: string | null; lines: ContentLine[] } {
-  if (!getSongMetaFn) return { title: null, source: null, videoId: null, lines: [] };
-  return getSongMetaFn();
-}
-
-// ---------------------------------------------------------------------------
-// Show Word Card bridge (on-demand, tool-driven)
-// ---------------------------------------------------------------------------
-
-export interface WordCardData {
-  word: string;
-  reading?: string;
-  meaning: string;
-  context?: string;
-}
-
-type ShowWordCardFn = (card: WordCardData) => void;
-let showWordCardFn: ShowWordCardFn | null = null;
-
-export function registerShowWordCard(fn: ShowWordCardFn | null) {
-  showWordCardFn = fn;
-}
-
-/** Called by Samuel's show_word_card tool to display a vocab card on demand. */
-export function showWordCard(card: WordCardData): boolean {
-  if (!showWordCardFn) return false;
-  showWordCardFn(card);
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Vocab Card Mode bridge (manual ↔ auto)
-// ---------------------------------------------------------------------------
-
-export type VocabCardMode = "manual" | "auto";
-
-type SetCardModeFn = (mode: VocabCardMode, intervalSec?: number) => void;
-let setCardModeFn: SetCardModeFn | null = null;
-
-export function registerSetCardMode(fn: SetCardModeFn | null) {
-  setCardModeFn = fn;
-}
-
-/** Called by Samuel to switch between manual and auto vocab card modes. */
-export function setCardMode(mode: VocabCardMode, intervalSec?: number) {
-  setCardModeFn?.(mode, intervalSec);
-}
-
 // ---------------------------------------------------------------------------
 // UI Update bridge
 // ---------------------------------------------------------------------------
@@ -331,24 +208,6 @@ export function applyUIUpdate(component: string, property: string, value: string
     return "UI update not available.";
   }
   return uiUpdateFn(component, property, value);
-}
-
-// ---------------------------------------------------------------------------
-// Dismiss Card bridge
-// ---------------------------------------------------------------------------
-
-type DismissCardFn = () => void;
-let dismissCardFn: DismissCardFn | null = null;
-
-export function registerDismissCard(fn: DismissCardFn | null) {
-  dismissCardFn = fn;
-}
-
-/** Dismiss the currently visible vocab card. Called by Samuel's dismiss_card tool. */
-export function dismissCurrentCard(): boolean {
-  if (!dismissCardFn) return false;
-  dismissCardFn();
-  return true;
 }
 
 // ---------------------------------------------------------------------------

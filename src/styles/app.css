@@ -71,6 +71,15 @@ html, body, #root {
   max-width: var(--bubble-max-width, 280px);
   max-height: 40vh;
   overflow-y: auto;
+  /* Without no-drag the parent .drag-region eats scroll-wheel events here,
+     so long agent replies become un-scrollable. We turn the bubble itself
+     into a no-drag pocket so the wheel hits the scroll container. */
+  -webkit-app-region: no-drag;
+  /* Let momentum scrolling feel native on macOS trackpads. */
+  -webkit-overflow-scrolling: touch;
+  /* Thin, on-hover scrollbar so a long bubble has a visual affordance. */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
   padding: 14px 18px;
   opacity: var(--bubble-opacity, 1);
   border-radius: 18px;
@@ -80,6 +89,23 @@ html, body, #root {
   z-index: 2;
   flex-shrink: 0;
   transition: font-size 0.2s ease;
+  /* Allow text selection inside bubbles even though the parent is drag. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.speech-bubble::-webkit-scrollbar {
+  width: 6px;
+}
+.speech-bubble::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 3px;
+}
+.speech-bubble::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.55);
+}
+.speech-bubble::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .speech-bubble p {
@@ -677,245 +703,6 @@ html, body, #root {
 
 .grammar-examples li {
   margin-bottom: 2px;
-}
-
-/* ── Vocab/Grammar Card — ambient learning pop-up ────────── */
-.vocab-card {
-  position: fixed;
-  right: var(--vocab-card-side, 20px);
-  left: var(--vocab-card-side-left, auto);
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 100;
-  pointer-events: auto;
-  width: 300px;
-
-  background: rgba(10, 15, 30, 0.88);
-  backdrop-filter: blur(24px) saturate(1.4);
-  -webkit-backdrop-filter: blur(24px) saturate(1.4);
-  border: 1px solid rgba(99, 102, 241, 0.25);
-  border-radius: calc(var(--app-radius, 14px) + 6px);
-  padding: 20px;
-  box-shadow:
-    0 0 0 1px rgba(99, 102, 241, 0.1),
-    0 20px 60px rgba(0, 0, 0, 0.5),
-    0 0 40px rgba(99, 102, 241, 0.08),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
-
-  animation: vocab-card-enter 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
-}
-
-.vocab-card-exit {
-  animation: vocab-card-leave 0.4s cubic-bezier(0.55, 0, 1, 0.45) both;
-}
-
-/* Source badge */
-.vocab-card-header {
-  margin-bottom: 12px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.vocab-card-source {
-  font-size: 11px;
-  color: rgba(167, 139, 250, 0.8);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  flex: 1;
-}
-
-.vocab-card-header-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
-
-/* Close button */
-.vocab-card-close-btn {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.06);
-  color: rgba(255, 255, 255, 0.4);
-  font-size: 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-  line-height: 1;
-}
-.vocab-card-close-btn:hover {
-  background: rgba(255, 80, 80, 0.2);
-  border-color: rgba(255, 80, 80, 0.3);
-  color: rgba(255, 120, 120, 0.9);
-}
-
-/* Scene clip replay button */
-.vocab-card-play-btn {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 1px solid rgba(99, 102, 241, 0.3);
-  background: rgba(99, 102, 241, 0.15);
-  color: #a78bfa;
-  font-size: 12px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s ease;
-  flex-shrink: 0;
-}
-.vocab-card-play-btn:hover {
-  background: rgba(99, 102, 241, 0.3);
-  border-color: rgba(99, 102, 241, 0.5);
-  transform: scale(1.1);
-}
-.vocab-card-play-btn:active {
-  transform: scale(0.95);
-}
-
-/* Main content */
-.vocab-card-content {
-  font-size: 15px;
-  line-height: 1.6;
-  color: #e2e8f0;
-  margin: 0 0 18px 0;
-  word-break: break-word;
-}
-
-/* Tool-driven word card body */
-.word-card-body {
-  padding: 4px 0 8px;
-  font-size: var(--word-card-font-size, 13px);
-}
-.word-card-word {
-  font-size: calc(var(--word-card-font-size, 13px) * 2.15);
-  font-weight: 700;
-  color: #f0f4f8;
-  margin-bottom: 2px;
-}
-.word-card-reading {
-  font-size: 14px;
-  color: #818cf8;
-  margin-bottom: 6px;
-}
-.word-card-meaning {
-  font-size: 15px;
-  line-height: 1.5;
-  color: #e2e8f0;
-  margin-bottom: 6px;
-}
-.word-card-context {
-  font-size: 13px;
-  line-height: 1.5;
-  color: rgba(255, 255, 255, 0.5);
-  font-style: italic;
-}
-
-/* Action buttons row */
-.vocab-card-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.vocab-card-btn {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-  padding: 10px 4px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  color: rgba(255, 255, 255, 0.7);
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-}
-
-.vocab-card-btn:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-}
-
-.vocab-card-btn:active {
-  transform: scale(0.96);
-}
-
-.vocab-card-btn-icon {
-  font-size: 16px;
-  line-height: 1;
-}
-
-/* New to me — warm amber */
-.vocab-card-btn-new {
-  border-color: rgba(251, 191, 36, 0.15);
-}
-.vocab-card-btn-new:hover {
-  background: rgba(251, 191, 36, 0.12);
-  border-color: rgba(251, 191, 36, 0.3);
-  color: #fbbf24;
-}
-
-/* I know it — green */
-.vocab-card-btn-know {
-  border-color: rgba(34, 197, 94, 0.15);
-}
-.vocab-card-btn-know:hover {
-  background: rgba(34, 197, 94, 0.12);
-  border-color: rgba(34, 197, 94, 0.3);
-  color: #22c55e;
-}
-
-/* Explain — purple/indigo */
-.vocab-card-btn-explain {
-  border-color: rgba(99, 102, 241, 0.15);
-}
-.vocab-card-btn-explain:hover {
-  background: rgba(99, 102, 241, 0.15);
-  border-color: rgba(99, 102, 241, 0.35);
-  color: #818cf8;
-}
-
-/* ── Entrance: scale up from center-right with spring ──── */
-@keyframes vocab-card-enter {
-  0% {
-    opacity: 0;
-    transform: translateY(-50%) translateX(40px) scale(0.7);
-    filter: blur(6px);
-  }
-  50% {
-    opacity: 1;
-    filter: blur(0);
-  }
-  100% {
-    opacity: 1;
-    transform: translateY(-50%) translateX(0) scale(1);
-    filter: blur(0);
-  }
-}
-
-/* ── Exit: shrink and slide out right ──────────────────── */
-@keyframes vocab-card-leave {
-  0% {
-    opacity: 1;
-    transform: translateY(-50%) translateX(0) scale(1);
-    filter: blur(0);
-  }
-  100% {
-    opacity: 0;
-    transform: translateY(-50%) translateX(60px) scale(0.85);
-    filter: blur(4px);
-  }
 }
 
 /* ── Teach Mode — Drop Zone ──────────────────────────────── */
@@ -1571,7 +1358,12 @@ html, body, #root {
   animation: fade-in 0.2s ease both;
 }
 .plugin-approval-exit {
-  animation: vocab-card-exit 0.3s ease both;
+  animation: plugin-approval-leave 0.3s ease both;
+}
+
+@keyframes plugin-approval-leave {
+  0%   { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(0.92); }
 }
 
 .plugin-approval-header {
@@ -1851,126 +1643,10 @@ html, body, #root {
   line-height: 1.4;
 }
 
-/* When lyrics panel is open, push character stage right to avoid overlap */
-.lyrics-active .character-stage {
-  margin-left: calc(var(--lyrics-width, 185px) + 12px);
-  transition: margin-left 0.3s ease;
-}
-
-/* ── Lyrics HUD — floating holographic panel (non-blocking) ── */
-.lyrics-hud {
-  position: fixed;
-  left: var(--lyrics-left, 8px);
-  top: var(--lyrics-top, 40px);
-  bottom: 60px;
-  width: var(--lyrics-width, 185px);
-  font-size: var(--lyrics-font-size, 12px);
-  z-index: 120;
-  display: flex;
-  flex-direction: column;
-  background: rgba(10, 14, 30, var(--lyrics-opacity, 0.55));
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: var(--app-radius, 14px);
-  padding: 8px 6px 6px;
-  box-shadow:
-    0 0 20px rgba(99, 102, 241, 0.08),
-    inset 0 0 30px rgba(99, 102, 241, 0.03);
-  animation: lyrics-hud-in 0.3s ease both;
-  pointer-events: auto;
-}
-
-@keyframes lyrics-hud-in {
+/* Generic floating-panel fade-in used by plugin-loader's showPanel(). */
+@keyframes panel-fade-in {
   from { opacity: 0; transform: translateX(-12px) scale(0.96); }
   to   { opacity: 1; transform: translateX(0) scale(1); }
-}
-
-.lyrics-hud-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  flex-shrink: 0;
-  padding: 0 4px;
-}
-
-.lyrics-hud-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: rgba(129, 140, 248, 0.7);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.lyrics-hud-close {
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.3);
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 2px;
-  line-height: 1;
-  flex-shrink: 0;
-  transition: color 0.15s;
-}
-
-.lyrics-hud-close:hover {
-  color: rgba(255, 255, 255, 0.8);
-}
-
-.lyrics-hud-body {
-  overflow-y: auto;
-  flex: 1;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(99, 102, 241, 0.2) transparent;
-}
-
-.lyrics-hud-body::-webkit-scrollbar {
-  width: 3px;
-}
-
-.lyrics-hud-body::-webkit-scrollbar-thumb {
-  background: rgba(99, 102, 241, 0.25);
-  border-radius: 3px;
-}
-
-.lyrics-hud-line {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-  border-left: 2px solid transparent;
-}
-
-.lyrics-hud-line:hover {
-  background: rgba(99, 102, 241, 0.1);
-}
-
-.lyrics-hud-line-active {
-  background: rgba(99, 102, 241, 0.12);
-  border-left-color: #818cf8;
-}
-
-.lyrics-hud-ts {
-  font-size: 9px;
-  color: rgba(99, 102, 241, 0.4);
-  min-width: 28px;
-  flex-shrink: 0;
-  font-variant-numeric: tabular-nums;
-}
-
-.lyrics-hud-text {
-  font-size: var(--lyrics-font-size, 12px);
-  color: rgba(226, 232, 240, 0.85);
-  line-height: 1.4;
 }
 
 /* ── Tool Approval Card ──────────────────────────────────────────────── */

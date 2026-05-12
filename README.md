@@ -1,6 +1,6 @@
 # Samuel — the AI that works with you, not for you
 
-An always-on voice AI desktop assistant for macOS that sees your screen, hears your audio, browses the web in the background, writes its own tools, and fixes them when they break — all without ever stealing your cursor or interrupting your flow. Built with Electron, React, TypeScript, and Playwright. MIT licensed.
+An always-on voice AI desktop assistant for macOS that can use your screen and audio (when you allow it), browse the web in the background, write its own tools, and fix them when they break — built to avoid stealing focus unnecessarily. Built with Electron, React, TypeScript, and Playwright. MIT licensed.
 
 **Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation, ambient monitoring ("tell me when you see/hear X").
 
@@ -13,11 +13,11 @@ An always-on voice AI desktop assistant for macOS that sees your screen, hears y
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request)
 [![Contributors](https://img.shields.io/github/contributors/sambuild04/screen-voice-agent.svg)](https://github.com/sambuild04/screen-voice-agent/graphs/contributors)
 
-> **TL;DR:** Say "Hey Samuel" and talk. He sees your screen, hears your audio, browses the web for you, writes his own tools with GPT-5.5, auto-repairs them when they break, and remembers everything across sessions.
+> **TL;DR:** Say "Hey Samuel" and talk. With screen/audio permissions on, he can see and hear your desktop context, browse the web for you, write his own tools with GPT-5.5, auto-repair them when they break, and remembers preferences and skills across sessions.
 
 ## What's New
 
-- **Smart context decisions** — Samuel now decides per-turn whether your screen is even relevant before capturing it. Acks ("yes", "thanks"), command-intent ("play music on YouTube"), service mentions ("check my Gmail"), and meta-questions ("what can you do?") skip the AX-tree read + screenshot entirely. Saves ~1.3s of latency and ~150 KB of tokens per turn.
+- **Smart context decisions** — Samuel now decides per-turn whether your screen is even relevant before capturing it. Acks ("yes", "thanks"), command-intent ("open Slack in the browser"), service mentions ("check my Gmail"), and meta-questions ("what can you do?") skip the AX-tree read + screenshot entirely. Saves ~1.3s of latency and ~150 KB of tokens per turn.
 - **"That wasn't me"** — say "that's not my voice", "ignore that last one", or "I didn't say that" and Samuel erases the bogus user turn AND any reply to it from session memory + UI. Side effects (tab switches, key presses) get a verbal "want me to revert?" offer.
 - **Listening modes** — say "I'm watching anime, ignore the audio" and Samuel goes passive (only responds when addressed by name). Audio is still captured silently so you can later ask "what did they just say?".
 - **Control modes** — `background_workspace` / `observe_only` / `ask_before_action` / `takeover` switch between zero-touch ambient, read-only, ask-on-write, and full hands-on-keyboard.
@@ -32,7 +32,7 @@ Samuel interprets Japanese news in realtime — watching the screen and listenin
 
 https://github.com/user-attachments/assets/36fdd220-e1af-443a-99d3-31803160625c
 
-Ambient teaching while watching anime — vocab cards, scene clip flashcards, and voice explanations:
+Ambient teaching while watching anime — voice explanations and trigger alerts:
 
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
@@ -76,16 +76,9 @@ Samuel:  *opens GitHub* → *reads notification page* → summarizes
 
 Gmail, Outlook, LinkedIn, your bank, internal tools — anything you can open in a browser, Samuel can read and interact with.
 
-### Plugin Auto-Repair Pipeline (GPT-5.5 Reasoning)
+### Plugin Auto-Repair (GPT-5.5 Reasoning)
 
-When a plugin fails — whether it throws an error, returns wrong output, or you say "that's wrong" — Samuel runs a four-stage repair pipeline:
-
-| Stage | What happens |
-|---|---|
-| **Detect** | Runtime exception, `validates()` failure, or user feedback |
-| **Diagnose** | GPT-5.5 (high reasoning) categorizes: syntax bug, wrong API assumption, external change, structural issue |
-| **Repair** | Routes to targeted patch, full rewrite, ask user, or clean give-up based on diagnosis |
-| **Verify** | New code must parse and load before replacing the old version |
+When a plugin fails — runtime error, bad `validates()` output, or you say "that's wrong" — Samuel runs **auto-repair** backed by GPT-5.5 (high reasoning): it **diagnoses** the failure kind, **generates** a patch or rewrite, **verifies** the new code loads, and retries. That maps onto detect → diagnose → repair → verify logically, but it is a **single automated path** (not four separate user-visible stages).
 
 Max 2 attempts. If it can't fix it, you get a plain-language explanation of what went wrong and what Samuel needs from you to continue.
 
@@ -98,13 +91,13 @@ Plugins can wrap existing tools with a middleware pattern. A plugin with `wraps:
 Samuel doesn't just execute tasks — he remembers how he did them. After successfully chaining 3+ tools, he saves the workflow as a reusable "skill."
 
 ```
-You:     "Compare the lyrics with the real ones online and fix any mistakes"
-Samuel:  *searches web → reads lyrics page → compares → corrects 4 lines*
+You:     "Find every Japanese name in this article and add furigana"
+Samuel:  *reads page → extracts names → annotates each one*
          "Done. I've saved this as a skill for next time."
 
          ...next session...
 
-You:     "The lyrics are wrong again"
+You:     "Same thing on this new article"
 Samuel:  *loads saved skill → executes in seconds*
 ```
 
@@ -129,12 +122,14 @@ Triggers are first-class objects with cooldowns, enable/disable, fire counts, an
 
 ### Always Watching, Always Listening
 
-Samuel runs a continuous perception loop:
+Samuel can run continuous perception when you enable it and use ambient features:
 
-- **Screen** — captures via GPT-4o Vision every 20s with smart change detection; fresh screenshot auto-injected when you speak (only when relevant — see Smart Context below)
-- **Audio** — transcribes system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice)
-- **Context injection** — feeds observations silently so he always knows what's happening
-- **Watcher loop** — evaluates active triggers against every audio/screen event, fires synthetic turns to speak proactively
+- **Screen** — with learning language / ambient mode, periodic vision passes (on an interval) plus smart change detection; on each voice turn, AX + screenshot may refresh when relevant (see Smart Context below — many turns skip capture).
+- **Audio** — system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice when configured)
+- **Context injection** — observations can be fed silently when privacy toggles allow
+- **Watcher loop** — evaluates active triggers against audio/screen events, may fire synthetic turns to speak proactively
+
+Screen and audio are **not** on unconditionally: use the settings toggles for screen watch and audio listen, and expect lower capture frequency when smart context skips a turn.
 
 ### Smart Context — Decide Before Capturing
 
@@ -146,7 +141,7 @@ Samuel now classifies each transcript before deciding to capture:
 |---|---|---|
 | Conversational ack | "yes", "thanks", "got it" | No — prior context still applies |
 | Meta / chitchat | "what can you do?", "how are you?", "tell me a joke" | No — screen is irrelevant |
-| Service mention | "play music on YouTube", "check my Gmail" | No — model uses tools to access the service |
+| Service mention | "open Notion in the browser", "check my Gmail" | No — model uses tools to access the service |
 | Command verb | "open Mail", "find that file" | No — model fetches fresh data via tools |
 | Referential | "translate this", "what does that say" | **Yes** — pointing at the current screen |
 | Anything else | "summarize this PDF" | Yes — defaults to capture when ambiguous |
@@ -155,7 +150,7 @@ When the screen is genuinely relevant, captures are de-duped by AX-tree hash (sk
 
 ### Voice-First Recovery — "That wasn't me"
 
-The mic can't tell your voice from background audio. When a video, music, another person, or a Whisper hallucination gets transcribed as a command, Samuel will act on it. Telling him is the fix:
+The mic can't tell your voice from background audio. When a video, background audio, another person, or a Whisper hallucination gets transcribed as a command, Samuel will act on it. Telling him is the fix:
 
 ```
 You:     "Hey Samuel, ignore that last one — that wasn't me."
@@ -182,16 +177,16 @@ Two voice-controllable axes for non-interruptive UX:
 | Listening: `normal` | "Done watching, you can listen normally" | Auto-respond to any clear speech |
 | Control: `background_workspace` | "Stay in the background" | Zero-touch — watch & alert only, no actions |
 | Control: `observe_only` | "Just observe" | Read tools allowed, no writes/clicks |
-| Control: `ask_before_action` (default) | "Ask me before doing things" | Navigation & media keys auto-allowed; writes need approval |
-| Control: `takeover` | "Take the wheel" | Full keyboard/mouse control, no per-action prompts |
+| Control: `ask_before_action` | "Ask me before doing things" | Navigation & media keys auto-allowed; writes need approval |
+| Control: `takeover` (default) | "Take the wheel" | Full keyboard/mouse control; only the riskiest actions still gate |
 
-Inside `ask_before_action`, key-risk is classified per-action: media keys (`k`, `space`, arrows), Enter, Tab, Escape, and copy/paste auto-approve as `navigation`; only destructive shortcuts (`cmd+w`, `cmd+q`, `cmd+s`, bare `delete`) trip the approval card. No more "should I press k?" loops while playing music.
+Inside `ask_before_action`, key-risk is classified per-action: media keys (`k`, `space`, arrows), Enter, Tab, Escape, and copy/paste auto-approve as `navigation`; only destructive shortcuts (`cmd+w`, `cmd+q`, `cmd+s`, bare `delete`) trip the approval card. Fewer "should I press k?" loops when using media shortcuts.
 
 ### Capability Boundaries — Honest About What He Can and Cannot Do
 
 Samuel classifies every request before attempting it:
 
-- **CAN DO:** anything involving his tools (screen, web, browser, files, plugins, UI, memory, songs)
+- **CAN DO:** anything involving his tools (screen, web, browser, files, plugins, UI, memory)
 - **NEEDS YOUR HELP:** sign into a website, provide an API key, demonstrate a workflow
 - **CANNOT DO:** modify compiled code, add native OS features, access hardware sensors
 
@@ -225,8 +220,7 @@ Samuel is his own settings panel. No menus, no preferences screen:
 |---|---|
 | "Make yourself smaller" | Avatar shrinks |
 | "Make the window wider" | App window resizes |
-| "Show me word cards while I watch" | Switches to auto vocab card mode |
-| "Move the lyrics to the left" | Lyrics panel repositions + window auto-adjusts |
+| "Show me a panel with my flight details" | Builds an HTML panel via `show_content` |
 | "Speak quieter" / "You're too loud" | Samuel's voice volume adjusts independently |
 | "Turn down the video" | macOS system volume adjusts |
 | "Reset the UI" | All visual settings restored |
@@ -250,20 +244,9 @@ Samuel is his own settings panel. No menus, no preferences screen:
 
 Record any audio (meetings, lectures, videos) and ask Samuel anything about the transcript. One recording, any question — summarize, find topics, break down grammar, extract action items.
 
-### Song Teaching Mode
-
-Drop a YouTube link and Samuel becomes a music tutor:
-
-1. Downloads audio, searches for lyrics (LRCLIB + Genius + web search + Whisper fallback)
-2. "Play the first 3 lines" — original audio plays, mic auto-mutes
-3. Audio finishes → mic unmutes → Samuel explains vocabulary and grammar
-4. Lyrics display in floating HUD — tap any line to play that segment
-5. Wrong lyrics? Say "the lyrics are wrong" — Samuel searches the web, compares, and corrects automatically
-
 ### Chat Box — Drop Anything, Ask Anything
 
 - **Text** → Samuel explains, translates, teaches
-- **YouTube link** → song teaching mode
 - **Article URL** → extracted and annotated
 - **Image / manga** → OCR + breakdown
 - **API key** → securely stored
@@ -271,10 +254,6 @@ Drop a YouTube link and Samuel becomes a music tutor:
 ### OAuth Integration (Zero-Config for Known Providers)
 
 For API-level access, PKCE-based OAuth with built-in client IDs for Google, GitHub, and Spotify. User just clicks "Allow" — no Cloud Console setup. Power users can override with their own credentials.
-
-### Scene Clip Flashcards
-
-Vocab card appears → tap "Save it" → Samuel saves the 20-second audio clip plus screenshot. Flashcards are real scenes with the original voice actor's delivery.
 
 ### Privacy Controls
 
@@ -301,12 +280,11 @@ Toggle screen watching and audio listening directly from the settings button. Al
          │
          ├─ Modes: listening (normal/passive) + control (4 levels) + per-key risk
          ├─ Plugin system: propose → GPT-5.5 generate → review → validate → install
-         ├─ Auto-repair: detect failure → GPT-5.5 diagnose → route repair → verify
+         ├─ Auto-repair: failure → GPT-5.5 diagnose + patch/rewrite → verify (max 2 tries)
          ├─ Wraps/middleware: plugins extend existing tools without replacing them
          ├─ Skill system: execute workflow → save as skill → replay next time
          ├─ Computer Use: GPT-5.5 visual desktop control via computer_use_preview
          ├─ OAuth: PKCE + built-in client IDs → zero-config for known providers
-         ├─ Song playback: yt-dlp → local audio → HTML5 <audio> with seek
          ├─ Recording: Whisper transcribe → user-directed analysis
          ├─ Volume control: independent Samuel voice + macOS system volume
          ├─ Secrets store: ~/.samuel/secrets.json (local)
@@ -322,7 +300,6 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | GPT-4o Vision | Screen scanning, ambient observation | ~3-5s |
 | GPT-4o-mini | Plugin code review, trigger classification, screen text extraction | ~1s |
 | gpt-4o-transcribe | Recording transcription (high-fidelity) | ~3-10s |
-| whisper-1 | Song segmentation with timestamps | ~3-5s |
 
 ### Key Tools
 
@@ -338,7 +315,6 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | `web_browse` | Search the internet (3 tiers) and read web pages |
 | `plugin_manage` | Self-modification — propose, write, **repair**, remove, list plugins |
 | `skill_manage` | Save, search, and replay multi-step workflows |
-| `song_control` | Play, pause, lyrics, refetch, correct |
 | `recording` | Start/stop system audio capture |
 | `watch_for` | Register ambient triggers — keyword or classifier-based |
 | `set_control_mode` | Switch background / observe / ask / takeover |
@@ -347,13 +323,10 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | `set_learning_language` | Activate ambient language tutoring |
 | `set_volume` | Adjust Samuel's voice or macOS system volume |
 | `update_ui` / `query_ui_state` / `show_content` | Voice-controlled UI changes |
-| `vocab_card` | Vocabulary cards (manual/auto mode) |
 | `oauth_connect` | Zero-config OAuth for Google/GitHub/Spotify |
 | `file_op` | Read, write, list files on disk |
 | `store_secret` | Secure API key storage |
 | `remember_preference` / `mark_vocabulary_known` / `record_correction` | Persistent memory |
-| `get_recent_actions` | Self-awareness — recall recent tool calls |
-| `pronounce` | Speak correct pronunciation |
 
 ---
 
@@ -373,8 +346,6 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | AX Tree | macOS Accessibility Tree multi-app reader |
 | Plugin Runtime | `new Function()` + secrets + UI injection + validates + wraps |
 | OAuth | PKCE + built-in client IDs (Google, GitHub, Spotify) |
-| Song Audio | [yt-dlp](https://github.com/yt-dlp/yt-dlp) + HTML5 Audio |
-| Lyrics | [LRCLIB](https://lrclib.net) + [Genius](https://genius.com) + web search fallback |
 | Web Search | [SerpAPI](https://serpapi.com) (Google) + OpenAI deep search + Brave fallback |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` + per-tab title match |
@@ -391,12 +362,11 @@ Toggle screen watching and audio listening directly from the settings button. Al
 - macOS 14+ (Sonoma or later)
 - Node.js 20+
 - OpenAI API key with Realtime API + GPT-5.5 access
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew install yt-dlp`) for song features
 
 ### Install
 
 ```bash
-brew install steipete/tap/peekaboo yt-dlp
+brew install steipete/tap/peekaboo
 git clone https://github.com/sambuild04/screen-voice-agent.git
 cd screen-voice-agent
 npm install
@@ -448,7 +418,7 @@ Say **"Hey Samuel"** and start talking.
 
 ## Roadmap
 
-The vision: an AI that lives where you work, sees what you see, hears what you hear, writes its own tools, fixes its own bugs, and gets better at helping you every day.
+The vision: an AI that can work alongside you where you do: optional screen and audio awareness, tools that evolve with you, fixes its own plugin bugs, and gets better at helping you over time.
 
 - **One-click installer** — packaged `.dmg`, no compilation. *(in progress)*
 - **Persistent browser sessions** — save cookies so you don't re-login every time.
@@ -461,9 +431,7 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 - **Local-first mode** — local Whisper + Ollama, no API key required.
 - **Cross-platform** — Windows and Linux ports.
 - **iOS / Android companion** — pick up where you left off.
-- **SRS scheduling** — spaced repetition on saved scene flashcards.
 - **Auto-healing plugins** — if a plugin fails in the background, auto-fix without interrupting the user. *(shipped — up to 2 attempts)*
-- **Anki export.**
 
 ---
 
@@ -486,13 +454,13 @@ The vision: an AI that lives where you work, sees what you see, hears what you h
 ## FAQ
 
 **What is Samuel?**
-An open-source voice AI desktop agent that continuously sees your screen and hears your audio, lets you control it by voice, browses the web like a human, and writes and repairs its own tools at runtime using GPT-5.5 with reasoning.
+An open-source voice AI desktop agent that can use your screen and system audio when enabled, obeys privacy toggles, lets you control it by voice, browses the web like a human, and writes and repairs its own tools at runtime using GPT-5.5 with reasoning.
 
 **What can I use it for?**
 Language learning while watching content, hands-free web browsing ("show me my emails"), building custom AI tools by voice, live meeting interpretation, searching and summarizing anything on the web, ambient monitoring ("tell me when you hear X"), and general desktop automation.
 
 **How is this different from ChatGPT Voice?**
-ChatGPT can't see your screen continuously, can't browse the web as a real browser, can't write persistent tools, and can't auto-repair when things break. Samuel does all of these, and runs locally on your Mac.
+ChatGPT does not run as a see-your-desktop assistant with your tool and plugin surface. Samuel integrates screen/audio (when allowed), real browser automation, persistent local skills, and an auto-repair loop for plugins. The assistant runs locally on your Mac; model calls still go to OpenAI when you use those features.
 
 **What models does it use?**
 OpenAI Realtime API for voice, GPT-5.5 with reasoning for code generation and failure diagnosis, GPT-4o Vision for screen capture, GPT-4o-mini for code review, Whisper for transcription.

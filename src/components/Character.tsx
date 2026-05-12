@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
 import type { TranscriptEntry } from "../hooks/useRealtime";
 import type { AnalysisStage, RecordingAnalysis, RecordingState } from "../hooks/useRecordMode";
@@ -82,6 +82,19 @@ export function Character({
     .reverse()
     .find((e) => e.role === "assistant");
 
+  // Auto-scroll the assistant bubble to the bottom as text streams in,
+  // but only when the user is already at/near the bottom — otherwise we
+  // respect that they scrolled up to read earlier content.
+  const samuelBubbleRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = samuelBubbleRef.current;
+    if (!el || !latestAssistant) return;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distFromBottom < 80) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [latestAssistant?.text]);
+
   // Show the latest user message as a speech bubble
   const latestUser = [...transcript]
     .reverse()
@@ -132,7 +145,7 @@ export function Character({
 
       {/* Samuel's speech bubble — top right of character */}
       {(latestAssistant || showThinking) && (
-        <div className="speech-bubble speech-bubble-samuel">
+        <div ref={samuelBubbleRef} className="speech-bubble speech-bubble-samuel">
           {showThinking ? (
             <div className="flex items-center gap-1">
               <div className="thinking-dot" style={{ animationDelay: "0ms" }} />

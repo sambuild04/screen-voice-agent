@@ -79,9 +79,21 @@ export function useRecordMode() {
     }
   }, []);
 
+  // Tracks whether a transcription request is in flight so the voice path
+  // (recording tool → notifyRecordingAction("analyze")) and the UI stop-button
+  // path (stopRecording → runTranscription) can't both race the same recording
+  // and deliver two `[System: Recording transcript ready]` messages.
+  const transcriptionInFlightRef = useRef(false);
+
   // Transcribe the recording in the background and give the raw transcript to Samuel.
   // No auto-analysis — the user tells Samuel what to do with it.
   const runTranscription = useCallback(() => {
+    if (transcriptionInFlightRef.current) {
+      console.log("[record] transcription already in flight — ignoring duplicate trigger");
+      return;
+    }
+    transcriptionInFlightRef.current = true;
+    clearAnalysisTimer();
     setAnalysisStage("transcribing");
     setAnalysisElapsed(0);
 
@@ -115,6 +127,8 @@ export function useRecordMode() {
         setAnalysisStage(null);
         setError(String(e));
         setState("idle");
+      } finally {
+        transcriptionInFlightRef.current = false;
       }
     })();
   }, [clearAnalysisTimer]);

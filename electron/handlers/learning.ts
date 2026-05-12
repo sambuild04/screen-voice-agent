@@ -9,7 +9,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { readConfigInternal } from "./config.js";
-import { saveAudioClip } from "./flashcards.js";
 import {
 	get_context as memoryGetContext,
 	record_observation as memoryRecordObservation,
@@ -23,6 +22,35 @@ let recordingChild: ChildProcess | null = null;
 let learningAudioChild: ChildProcess | null = null;
 const LEARNING_AUDIO_PATH = "/tmp/samuel-learning-audio.m4a";
 const RECORDING_PATH = "/tmp/samuel-recording.m4a";
+
+// ── Audio capture refcounting ────────────────────────────────────────────────
+//
+// The system-audio capture helper is a single OS-level resource (one
+// ScreenCaptureKit stream writing to LEARNING_AUDIO_PATH). Multiple consumers
+// may want it running at once — e.g. learning mode + the standalone watcher
+// loop — so we track which consumers are currently subscribed and stop the
+// helper only when the last one releases. Simultaneous transcription cycles
+// would race on the same file, so a single-flight latch around the chunk
+// read+transcribe step keeps them honest; the loser of the race just gets
+// an empty result and tries again next tick.
+const audioConsumers = new Set<string>();
+let audioCheckInFlight = false;
+
+function acquireAudioCapture(consumer: string): void {
+	const wasEmpty = audioConsumers.size === 0;
+	audioConsumers.add(consumer);
+	if (wasEmpty) {
+		startLearningAudioInternal();
+	}
+}
+
+async function releaseAudioCapture(consumer: string): Promise<void> {
+	if (!audioConsumers.delete(consumer)) return;
+	if (audioConsumers.size === 0) {
+		await stopLearningAudioInternal();
+		tryRemove(LEARNING_AUDIO_PATH);
+	}
+}
 
 // Screen change detection state
 let screenStateLastHash = 0;
@@ -85,7 +113,6 @@ export interface TriageDecision {
 export interface AudioCheckResult {
 	transcript: string | null;
 	hint: string | null;
-	clip_path: string | null;
 	pcm_audio_base64: string | null;
 }
 
@@ -314,6 +341,29 @@ async function transcribeFile(
 	return resp.json() as Promise<Record<string, unknown>>;
 }
 
+// Cheap script-based language detector used to replace Whisper's
+// `verbose_json` language field (gpt-4o-transcribe returns plain `json`
+// only — see https://developers.openai.com/api/docs/guides/speech-to-text#transcriptions).
+// Returns "" when the script is ambiguous (Latin), which the caller
+// treats as "don't filter".
+function detectScriptLanguage(text: string): string {
+	let han = 0;
+	let hiraKata = 0;
+	let hangul = 0;
+	for (const ch of text) {
+		const cp = ch.codePointAt(0) ?? 0;
+		if ((cp >= 0x3040 && cp <= 0x309F) || (cp >= 0x30A0 && cp <= 0x30FF)) hiraKata++;
+		else if (cp >= 0xAC00 && cp <= 0xD7AF) hangul++;
+		else if (cp >= 0x4E00 && cp <= 0x9FFF) han++;
+	}
+	// Hiragana/katakana are unique to Japanese; any presence pins the language.
+	if (hiraKata > 0) return "ja";
+	if (hangul > 2) return "ko";
+	// Han-only without kana → Chinese (kanji-only Japanese sentences are rare in dialogue).
+	if (han > 2) return "zh";
+	return "";
+}
+
 function isSelfVoice(transcript: string): boolean {
 	const lower = transcript.toLowerCase();
 	for (const speech of samuelRecentSpeech) {
@@ -438,31 +488,46 @@ function convertToPcmBase64(m4aPath: string): string | null {
 	}
 }
 
-function waitForChild(child: ChildProcess, timeoutSecs: number): void {
-	const start = Date.now();
-	while (child.exitCode === null) {
-		if (Date.now() - start > timeoutSecs * 1000) {
-			child.kill("SIGKILL");
+// Stop a child process and WAIT for it to actually exit. Critical for the
+// audio recorder helper — its SIGTERM handler calls AVAssetWriter.finishWriting()
+// to commit the moov atom, which can take 3-5s on a busy system. The old
+// implementation busy-waited via execFileSync("sleep") which BLOCKED the
+// event loop, so child.exitCode was NEVER updated (libuv processes 'exit'
+// in the loop) — every stop hit the timeout and SIGKILL'd the helper
+// mid-finalize, producing a moov-less m4a that ffmpeg can salvage but
+// OpenAI's mp4 demuxer rejects as "Audio file might be corrupted or
+// unsupported". The helper's internal finalize timeout is 5s, so we
+// give it 8s here as a hard upper bound.
+function stopChildProcessAsync(
+	child: ChildProcess,
+	timeoutSecs = 8,
+): Promise<void> {
+	return new Promise((resolve) => {
+		if (child.exitCode !== null || child.signalCode !== null) {
+			resolve();
 			return;
 		}
-		execFileSync("sleep", ["0.1"]);
-	}
-}
-
-function stopChildProcess(child: ChildProcess, timeoutSecs = 5): void {
-	child.kill("SIGTERM");
-	const start = Date.now();
-	while (child.exitCode === null) {
-		if (Date.now() - start > timeoutSecs * 1000) {
-			child.kill("SIGKILL");
-			return;
-		}
-		try {
-			execFileSync("sleep", ["0.1"]);
-		} catch {
-			return;
-		}
-	}
+		let settled = false;
+		const finish = () => {
+			if (settled) return;
+			settled = true;
+			resolve();
+		};
+		child.once("exit", finish);
+		child.kill("SIGTERM");
+		setTimeout(() => {
+			if (child.exitCode === null && child.signalCode === null) {
+				console.error(
+					`[record-helper] finalize timeout after ${timeoutSecs}s — sending SIGKILL`,
+				);
+				child.kill("SIGKILL");
+			}
+			// Don't resolve here directly — the SIGKILL will fire 'exit' and
+			// the listener above resolves naturally. As a safety net, resolve
+			// after a short grace.
+			setTimeout(finish, 500);
+		}, timeoutSecs * 1000);
+	});
 }
 
 // ── Learning audio internal ─────────────────────────────────────────────────
@@ -491,11 +556,11 @@ function startLearningAudioInternal(): void {
 	});
 }
 
-function stopLearningAudioInternal(): void {
+async function stopLearningAudioInternal(): Promise<void> {
 	if (!learningAudioChild) return;
 	const child = learningAudioChild;
 	learningAudioChild = null;
-	stopChildProcess(child, 3);
+	await stopChildProcessAsync(child, 8);
 	console.error("[learning-audio] stopped");
 }
 
@@ -606,7 +671,7 @@ export async function stop_recording(): Promise<string> {
 
 	const child = recordingChild;
 	recordingChild = null;
-	stopChildProcess(child, 5);
+	await stopChildProcessAsync(child, 8);
 
 	console.error("[recording] stopped");
 
@@ -792,18 +857,110 @@ export async function transcribe_recording(): Promise<string> {
 }
 
 export async function start_learning_audio(): Promise<void> {
-	startLearningAudioInternal();
+	acquireAudioCapture("learning");
 }
 
 export async function stop_learning_audio(): Promise<void> {
-	stopLearningAudioInternal();
-	tryRemove(LEARNING_AUDIO_PATH);
+	await releaseAudioCapture("learning");
 }
 
 export async function flush_learning_audio(): Promise<void> {
-	stopLearningAudioInternal();
-	tryRemove(LEARNING_AUDIO_PATH);
-	startLearningAudioInternal();
+	// Force a fresh helper so the next chunk is bounded. Keep the consumer
+	// set intact — flushing learning shouldn't tear down a watcher capture
+	// that wants to keep running.
+	if (audioConsumers.size > 0) {
+		await stopLearningAudioInternal();
+		tryRemove(LEARNING_AUDIO_PATH);
+		startLearningAudioInternal();
+	}
+}
+
+// Watcher counterparts — same underlying capture, separate consumer slot so
+// learning mode and the watcher loop can hold the helper independently.
+export async function start_watcher_audio(): Promise<void> {
+	acquireAudioCapture("watcher");
+}
+
+export async function stop_watcher_audio(): Promise<void> {
+	await releaseAudioCapture("watcher");
+}
+
+// Language-agnostic chunk read for the watcher loop. Strips the learning-mode
+// language filter + vocab-hint generation since watch triggers can fire on
+// any audio content (errors, voice tone, generic phrases, foreign-language
+// passages …). Returns a simple `{transcript}` shape; null transcript means
+// nothing usable this cycle (silence, hallucination, self-voice, race lost).
+export async function check_watcher_audio(): Promise<{ transcript: string | null }> {
+	const empty = { transcript: null };
+
+	// Single-flight latch — both learning + watcher loops share LEARNING_AUDIO_PATH,
+	// and only one of them may rotate the file per cycle. The other tries again
+	// next tick.
+	if (audioCheckInFlight) return empty;
+	if (recordingChild) return empty;
+	if (!audioConsumers.has("watcher")) return empty;
+
+	const config = readConfigInternal();
+	const apiKey = config.apiKey;
+	if (!apiKey) return empty;
+
+	audioCheckInFlight = true;
+	try {
+		await stopLearningAudioInternal();
+
+		if (!existsSync(LEARNING_AUDIO_PATH)) {
+			startLearningAudioInternal();
+			return empty;
+		}
+
+		const size = statSync(LEARNING_AUDIO_PATH).size;
+		if (size < 8000) {
+			tryRemove(LEARNING_AUDIO_PATH);
+			startLearningAudioInternal();
+			return empty;
+		}
+
+		if (!audioHasSpeechEnergy(LEARNING_AUDIO_PATH)) {
+			tryRemove(LEARNING_AUDIO_PATH);
+			startLearningAudioInternal();
+			return empty;
+		}
+
+		// Per OpenAI docs (https://developers.openai.com/api/docs/guides/speech-to-text#transcriptions),
+		// gpt-4o-transcribe supports ONLY 'json' or 'text' response_format —
+		// not 'verbose_json' (whisper-1 only). Pre-filters (audioHasSpeechEnergy
+		// RMS check + isWhisperHallucination + isSelfVoice) cover the silence
+		// case that no_speech_prob used to gate, so dropping the segment-level
+		// signal is safe here.
+		const whisperBody = await transcribeFile(
+			apiKey, LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
+			"Transcribe the audio accurately. Focus on spoken words; ignore background music or sound effects. If no speech, return empty.",
+		);
+
+		tryRemove(LEARNING_AUDIO_PATH);
+		startLearningAudioInternal();
+
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const transcript = ((whisperBody as any).text ?? "").trim();
+		if (!transcript || transcript.length < 5) return empty;
+
+		if (isWhisperHallucination(transcript)) {
+			console.error(`[watcher-audio] filtered hallucination: ${truncateStr(transcript, 80)}`);
+			return empty;
+		}
+		if (isSelfVoice(transcript)) {
+			console.error(`[watcher-audio] filtered self-voice: ${truncateStr(transcript, 80)}`);
+			return empty;
+		}
+
+		console.error(`[watcher-audio] transcript: ${truncateStr(transcript, 120)}`);
+		return { transcript };
+	} catch (err) {
+		console.error(`[watcher-audio] check failed: ${err instanceof Error ? err.message : err}`);
+		return empty;
+	} finally {
+		audioCheckInFlight = false;
+	}
 }
 
 export async function check_learning_audio(args: {
@@ -812,7 +969,6 @@ export async function check_learning_audio(args: {
 	const empty: AudioCheckResult = {
 		transcript: null,
 		hint: null,
-		clip_path: null,
 		pcm_audio_base64: null,
 	};
 
@@ -821,8 +977,16 @@ export async function check_learning_audio(args: {
 	if (!apiKey) throw new Error("No API key");
 
 	if (recordingChild) return empty;
+	// Yield to the watcher loop if it's mid-cycle on the same audio file.
+	// This call already gets retried every CHECK_INTERVAL_MS by useLearningMode.
+	if (audioCheckInFlight) return empty;
 
-	stopLearningAudioInternal();
+	// Body kept at the existing indentation to minimize diff churn — the
+	// try/finally only exists to release the audioCheckInFlight latch on
+	// every exit path, including thrown exceptions and early returns.
+	audioCheckInFlight = true;
+	try {
+	await stopLearningAudioInternal();
 
 	if (!existsSync(LEARNING_AUDIO_PATH)) {
 		startLearningAudioInternal();
@@ -855,10 +1019,15 @@ export async function check_learning_audio(args: {
 	};
 	const langCode = targetLangCode[args.language.toLowerCase()] ?? "ja";
 
+	// Per OpenAI docs (https://developers.openai.com/api/docs/guides/speech-to-text#transcriptions),
+	// gpt-4o-transcribe supports ONLY 'json' or 'text' response_format —
+	// not 'verbose_json' (whisper-1 only). We lose Whisper's internal
+	// language detection and segment-level no_speech_prob; we cover both
+	// with cheaper alternatives below (script-based language guess +
+	// existing energy/hallucination/self-voice filters).
 	const whisperBody = await transcribeFile(
 		apiKey, LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
 		"Transcribe the dialogue speech accurately. There may be background music and sound effects — focus on the spoken words only. If no speech, return empty.",
-		"verbose_json",
 	);
 
 	const pcmBase64 = convertToPcmBase64(LEARNING_AUDIO_PATH);
@@ -866,42 +1035,34 @@ export async function check_learning_audio(args: {
 		console.error("[learning-audio] converted to PCM16 24kHz for realtime injection");
 	}
 
-	const savedClipPath = saveAudioClip(LEARNING_AUDIO_PATH);
 	tryRemove(LEARNING_AUDIO_PATH);
 	startLearningAudioInternal();
 
 	const transcript = ((whisperBody as any).text ?? "").trim();
-	const detectedLang: string = (whisperBody as any).language ?? "";
-
-	if (detectedLang) {
-		console.error(`[learning-audio] detected language: ${detectedLang}`);
-	}
 
 	if (!transcript || transcript.length < 5) {
 		console.error("[learning-audio] no speech detected");
 		return empty;
 	}
 
-	// Check no_speech_prob
-	const segments = (whisperBody as any).segments;
-	const noSpeechProb = Array.isArray(segments) && segments.length > 0
-		? (segments[0].no_speech_prob ?? 0)
-		: 0;
-	if (noSpeechProb > 0.7) {
-		console.error(`[learning-audio] high no_speech_prob (${noSpeechProb.toFixed(2)}), skipping`);
-		return empty;
+	// Script-based language guess. Cheap and reliable for CJK targets
+	// (the Unicode blocks below are language-unique). For Latin-script
+	// targets (es/fr/de/it/pt) we don't filter — the watch trigger will
+	// fire and the language-aware hint generator downstream rejects
+	// non-target audio anyway.
+	const detectedLang = detectScriptLanguage(transcript);
+	if (detectedLang) {
+		console.error(`[learning-audio] script-detected language: ${detectedLang}`);
 	}
 
-	// Language mismatch filter
 	const langMatchesTarget = !detectedLang
 		|| detectedLang === langCode
-		|| (langCode === "zh" && (detectedLang === "zh" || detectedLang === "chinese"));
+		|| (langCode === "zh" && detectedLang === "zh");
 	if (!langMatchesTarget) {
 		console.error(`[learning-audio] detected '${detectedLang}' but target is '${langCode}', skipping watch triggers`);
 		return {
 			transcript,
 			hint: null,
-			clip_path: savedClipPath,
 			pcm_audio_base64: pcmBase64,
 		};
 	}
@@ -984,16 +1145,14 @@ Transcript: ${transcript}`;
 
 	const hintVal = hint === "NONE" || hint.toUpperCase().startsWith("NONE") ? null : hint;
 
-	if (!hintVal && savedClipPath) {
-		tryRemove(savedClipPath);
-	}
-
 	return {
 		transcript,
 		hint: hintVal,
-		clip_path: savedClipPath,
 		pcm_audio_base64: pcmBase64,
 	};
+	} finally {
+		audioCheckInFlight = false;
+	}
 }
 
 export async function check_screen_for_language(args: {
@@ -1199,18 +1358,11 @@ export async function check_audio_for_language(args: {
 	// Wait for duration
 	await new Promise((resolve) => setTimeout(resolve, duration * 1000));
 
-	child.kill("SIGTERM");
-	// Wait for clean exit
-	await new Promise<void>((resolve) => {
-		const timeout = setTimeout(() => {
-			child.kill("SIGKILL");
-			resolve();
-		}, 3000);
-		child.on("exit", () => {
-			clearTimeout(timeout);
-			resolve();
-		});
-	});
+	// Use the shared async stop — gives the helper its full 5s finalize
+	// budget plus a 3s safety margin before SIGKILL. Old code used a 3s
+	// hard cap which interrupted moov-atom writes on busy systems and
+	// produced unparseable m4a files.
+	await stopChildProcessAsync(child, 8);
 
 	if (!existsSync(clipPath)) {
 		console.error("[learning-mode] audio clip not created");
@@ -1677,96 +1829,4 @@ export async function web_read(args: { url: string }): Promise<string> {
 
 	console.error(`[web] extracted ${result.length} chars`);
 	return result;
-}
-
-export async function fetch_genius_lyrics(args: {
-	track: string;
-	artist: string;
-}): Promise<string> {
-	const query = `${args.track} ${args.artist}`;
-	console.error(`[genius] searching: ${query}`);
-
-	const searchUrl = `https://genius.com/api/search/song?q=${urlEncode(query)}&per_page=5`;
-	const searchResp = await fetch(searchUrl, {
-		signal: AbortSignal.timeout(10_000),
-	});
-
-	if (!searchResp.ok) throw new Error("Genius search failed");
-
-	const searchJson = await searchResp.json();
-
-	// Find first song URL
-	let songUrl: string | null = null;
-	const sections = searchJson?.response?.sections;
-	if (Array.isArray(sections)) {
-		for (const section of sections) {
-			if (Array.isArray(section.hits)) {
-				for (const hit of section.hits) {
-					if (hit?.result?.url) {
-						songUrl = hit.result.url;
-						break;
-					}
-				}
-			}
-			if (songUrl) break;
-		}
-	}
-
-	if (!songUrl) throw new Error("No Genius results found");
-	console.error(`[genius] found: ${songUrl}`);
-
-	const pageResp = await fetch(songUrl, {
-		signal: AbortSignal.timeout(15_000),
-	});
-	if (!pageResp.ok) throw new Error("Failed to fetch Genius page");
-
-	const pageHtml = await pageResp.text();
-
-	// Extract lyrics from data-lyrics-container divs
-	const marker = 'data-lyrics-container="true"';
-	let lyrics = "";
-	let pos = 0;
-
-	while (true) {
-		const idx = pageHtml.indexOf(marker, pos);
-		if (idx === -1) break;
-
-		const gtOff = pageHtml.indexOf(">", idx);
-		if (gtOff === -1) break;
-		const contentStart = gtOff + 1;
-
-		// Walk forward counting div depth
-		let depth = 1;
-		let i = contentStart;
-		while (i < pageHtml.length && depth > 0) {
-			if (pageHtml.startsWith("<div", i)) {
-				depth++;
-				i += 4;
-			} else if (pageHtml.startsWith("</div>", i)) {
-				depth--;
-				if (depth === 0) break;
-				i += 6;
-			} else {
-				i++;
-			}
-		}
-
-		if (depth === 0) {
-			const raw = pageHtml.slice(contentStart, i);
-			const cleaned = stripHtmlToText(raw);
-			if (cleaned) {
-				if (lyrics) lyrics += "\n";
-				lyrics += cleaned;
-			}
-			pos = i + 6;
-		} else {
-			break;
-		}
-	}
-
-	lyrics = lyrics.trim();
-	if (!lyrics) throw new Error("No lyrics found on Genius page");
-
-	console.error(`[genius] extracted ${lyrics.length} chars of lyrics`);
-	return lyrics;
 }

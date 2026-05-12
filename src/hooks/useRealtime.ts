@@ -3,7 +3,7 @@ import { invoke, debugLog } from "../lib/invoke-bridge";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from "@openai/agents/realtime";
 import type { FunctionTool, RealtimeOutputGuardrail, RealtimeItem } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerSendAudioClip, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerDiscardLastTurn } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerDiscardLastTurn, registerInjectCorrection } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
 
 // ---------------------------------------------------------------------------
@@ -104,17 +104,29 @@ const outputGuardrails: RealtimeOutputGuardrail[] = [
       // or a quoted subject/title.
       const namePattern = /\b([A-Z][a-z]{1,15}) ([A-Z][a-z]{1,20})\b/g;
       const quotedPattern = /["“]([^"”]{4,80})["”]/g;
+      // Common sentence-starting words that look capitalized but aren't names.
+      // Without these, "My Calvin Rewards" trips because "My Calvin" gets
+      // flagged as a sender name when only "Calvin Rewards" is real.
+      const PRONOUN_OR_DEMONSTRATIVE = new Set([
+        "the", "your", "a", "an", "my", "our", "his", "her", "their",
+        "this", "that", "these", "those", "some", "each", "many", "few",
+        "all", "any", "both", "either", "neither", "no", "another", "such",
+        "what", "which", "whose", "i", "we", "you", "he", "she", "they", "it",
+        "let", "one", "two", "good", "hello", "sir", "yes", "no", "ok", "okay",
+      ]);
       const claims = new Set<string>();
       let m: RegExpExecArray | null;
       while ((m = namePattern.exec(text)) !== null) {
+        const w1 = m[1].toLowerCase();
+        // Skip if the first word is a pronoun/demonstrative — the second word
+        // is the real candidate and will appear in a later regex iteration if
+        // it's part of a multi-word name.
+        if (PRONOUN_OR_DEMONSTRATIVE.has(w1)) continue;
         const candidate = `${m[1]} ${m[2]}`;
-        // Skip common non-name false positives (You/Sir/Sentence-starts).
-        const lower = candidate.toLowerCase();
-        if (
-          lower.startsWith("the ") || lower.startsWith("your ") ||
-          lower.startsWith("a ") || lower.startsWith("an ") ||
-          /^(let me|one moment|good (morning|evening|night)|hello sir|sir [a-z])/i.test(candidate)
-        ) continue;
+        // Filter conversational filler — but be careful not to swallow real
+        // honorific names like "Sir Henry". The "sir" branch was previously
+        // `sir [a-z]` which (case-insensitive) also dropped legit names.
+        if (/^(let me|one moment|good (morning|evening|night)|hello sir)$/i.test(candidate)) continue;
         claims.add(candidate);
       }
       while ((m = quotedPattern.exec(text)) !== null) {
@@ -123,10 +135,26 @@ const outputGuardrails: RealtimeOutputGuardrail[] = [
       if (claims.size === 0) {
         return { tripwireTriggered: false, outputInfo: { reason: "no specific claims" } };
       }
-      // For each claim, verify substring presence in the tool result.
+      // Verify each claim. A claim is verified if EITHER the full phrase
+      // appears verbatim, OR a strong majority of its salient words appear
+      // in the haystack — paraphrasing "Calvin Klein Rewards" as "Calvin
+      // Rewards" should not be flagged as a hallucination.
+      const STOPWORDS = new Set([
+        "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at",
+        "is", "it", "as", "by", "be", "with", "from", "this", "that", "these",
+        "those", "your", "my", "our", "his", "her", "their", "i", "you", "we",
+        "new", "way", "earn", "subject", "from", "received", "pm", "am",
+      ]);
       const unverified: string[] = [];
       for (const c of claims) {
-        if (!haystack.includes(c.toLowerCase())) unverified.push(c);
+        const lc = c.toLowerCase();
+        if (haystack.includes(lc)) continue;
+        const salient = lc.split(/\W+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
+        if (salient.length === 0) continue;
+        const found = salient.filter((w) => haystack.includes(w)).length;
+        // Treat as paraphrase-verified if ≥60% of salient words are present.
+        if (found / salient.length >= 0.6) continue;
+        unverified.push(c);
       }
       const tripped = unverified.length > 0;
       return {
@@ -164,22 +192,97 @@ const HEARTBEAT_INTERVAL_MS = 30_000; // ping every 30s to prevent server-side i
 const SESSION_ROTATION_MS = 25 * 60 * 1000; // reconnect every 25 min (before 60-min hard cap)
 const CONTEXT_WINDOW_TURNS = 6; // carry this many turns across reconnections
 const AUTO_SCREEN_COOLDOWN_MS = 5_000; // min 5s between auto-screen injections to prevent token flood
+// When the AX content is identical to the previous inject AND we injected
+// within this window, skip the inject entirely. The model already has the
+// screenshot + AX in its conversation history. Larger window = less waste,
+// but eventually the user does want a fresh look — 60s is a balance.
+const CTX_DEDUP_WINDOW_MS = 60_000;
 // If transcript hasn't arrived this long after speech_stopped, fall back to capturing
 // context anyway — transcription is occasionally slow or fails.
 const TRANSCRIPT_WAIT_MS = 2_500;
 // Short utterances like "yes", "sounds good", "thanks" don't need a fresh screen
 // capture — the prior turn's context is still in the conversation. Skipping the
 // AX read + screenshot saves ~1-2s, ~150 KB of tokens, and a screenshot upload.
+// Pure single-thought acks: short reactions to the *previous* reply where
+// the current screen is NOT a new source of information. We intentionally
+// EXCLUDE bare imperatives like "do it", "do that", "tell me", "say it" —
+// those are either real commands (need fresh context) or mistranscriptions
+// of questions ("how are you doing" → "do it"); skipping context on them
+// produced the greeting-loop bug. The compositional form ("yes, do it" /
+// "ok, tell me") is still caught by COMPOSITIONAL_ACK_RE below.
 const ACK_PHRASES = new Set([
   "ok", "okay", "yes", "yeah", "yep", "yup", "no", "nope", "sure",
   "thanks", "thank you", "thx", "ty", "got it", "sounds good", "good",
   "great", "cool", "nice", "alright", "right", "correct", "exactly",
   "perfect", "awesome", "fine", "done", "stop", "wait",
-  "go on", "continue", "please continue", "keep going", "next",
+  "go on", "go ahead", "continue", "please continue", "keep going",
+  "carry on", "move on", "move along", "next",
+  "tell me more", "more",
   "really", "interesting", "wow", "huh", "hmm", "ah", "oh",
   "i see", "makes sense", "noted", "understood", "agreed",
   "let me think", "hold on", "one second", "one moment",
 ]);
+
+// Compositional acks like "yes continue" / "no don't" / "ok go on" /
+// "alright tell me now". Strict exact-match misses these because of the
+// prefix word, but they are unambiguously acks/feedback against the
+// previous turn — current screen is irrelevant.
+const COMPOSITIONAL_ACK_RE =
+  /^(?:yes|yeah|yep|yup|no|nope|ok|okay|sure|alright|all\s+right|right|please|fine)[,.\s]+(?:continue|go\s+on|go\s+ahead|do\s+(?:it|that)|carry\s+on|keep\s+going|tell\s+me(?:\s+(?:now|more))?|move\s+on|don'?t|do\s+not|stop|next|please)\b/i;
+
+// Reactive feedback / corrections about the previous reply. The screen
+// hasn't changed; the user is just steering Samuel. Capturing fresh
+// context here is wasted, AND the new context can pull the model back
+// to the wrong answer (saw this in the log — repeated identical reply
+// after "don't make this kind of mistake again").
+const FEEDBACK_RE =
+  /^(?:no[,.\s]+(?:that(?:'|\u2019)?s|that\s+is|don'?t|do\s+not|stop)|don'?t\s+(?:make|repeat|say|do|tell|use)|stop\s+(?:repeating|saying|doing)|that(?:'|\u2019)?s\s+(?:wrong|incorrect|not\s+(?:right|correct))|you(?:'|\u2019)?re\s+wrong|wrong\s+answer|come\s+on)\b/i;
+
+// Whisper-style transcription bias. HARD LIMIT 1024 chars enforced by the
+// Realtime API; if exceeded the whole session.update is rejected, which
+// silently strips `instructions` + `tools` from the session — Samuel comes
+// up as a generic assistant with no tools. Keep this terse, keyword-style.
+// Buckets in priority order:
+//   1) wake-word variants
+//   2) ambient-watcher controls (most-misheard phrases — "watch for",
+//      "trigger", "N2 level", "remind me less often")
+//   3) UI nouns the user actually says (page/video/tab/monitor — not
+//      "lane" or "meal")
+//   4) common app commands
+//   5) meta / takeover phrases
+//   6) language-study terms + Japanese code-switching
+// Whisper-style bias prompt for gpt-4o-transcribe. Per OpenAI speech-to-text
+// docs (https://developers.openai.com/api/docs/guides/speech-to-text#prompting):
+// the prompt biases the decoder TOWARD phrases that appear in it. So this
+// list must contain ONLY terms Whisper genuinely struggles with — proper
+// nouns, rare jargon, code-switched scripts. NEVER bait common English
+// commands or chitchat: a phrase like "just do it" in the prompt makes
+// "how are you doing" → "do it" plausible from a noisy/clipped clip.
+//
+// HARD LIMIT 1024 chars enforced by the Realtime API; if exceeded, the
+// whole session.update is rejected and Samuel comes up as a generic
+// assistant with no tools.
+const TRANSCRIPTION_BIAS_PROMPT =
+  "Samuel — Mac voice assistant: desktop control, language study, ambient watchers. " +
+  "Wake: Samuel, Sam, Sammy. " +
+  "Watchers: watch for, watch out for, trigger, alert me, notify me, remind me, " +
+  "remind less often, batch, digest, once when, cooldown, debounce, classifier, " +
+  "stop watching, pause it, drop unused, " +
+  "JLPT N5 N4 N3 N2 N1 level vocabulary. " +
+  "UI: page, video, tab, window, monitor, screen, link, sidebar, browser, app. " +
+  "Apps: Gmail, Calendar, Cursor, Chrome, Notes, CapCut, Spotify, Finder, WeChat. " +
+  "Language: translate, explain grammar, romaji, hiragana, katakana, kanji, " +
+  "particle, conjugation, pitch accent. " +
+  "Code-switch: 'how do you say X in Japanese' (X = Japanese phrase from screen).";
+
+// Static guard — fail fast in dev so a future edit doesn't silently strip
+// the whole session config again. Realtime API ceiling is 1024.
+if (TRANSCRIPTION_BIAS_PROMPT.length > 1024) {
+  throw new Error(
+    `TRANSCRIPTION_BIAS_PROMPT is ${TRANSCRIPTION_BIAS_PROMPT.length} chars, ` +
+      `must be <= 1024. Trim before shipping.`,
+  );
+}
 
 // Wake-phrase detector for passive-listening mode. Matches typical Whisper
 // transcriptions of "Samuel" / "Sammy" addressed at the start or middle of
@@ -196,12 +299,18 @@ function isConversationalAck(text: string): boolean {
   if (!text) return false;
   const normalized = text.toLowerCase().replace(/[.!?,'"…]/g, "").trim();
   if (!normalized) return false;
-  // STRICT: only exact phrase match. The earlier length-based heuristic
-  // misclassified mistranscribed phrases like "Pas on the disorder." (a
-  // garbled "DoorDash order") as acks and skipped context refresh.
-  // False negatives here just cost a screen capture; false positives give
-  // wrong answers — strongly prefer false negatives.
-  return ACK_PHRASES.has(normalized);
+  // 1) Exact phrase match (single-word + canonical multi-word acks).
+  if (ACK_PHRASES.has(normalized)) return true;
+  // 2) Compositional acks ("yes continue", "ok go on", "no don't").
+  //    Bounded to short phrases (<=6 words) so genuinely-content-bearing
+  //    sentences like "no don't open the email yet" are still caught
+  //    later — those need a real answer, not just an ack.
+  const wordCount = normalized.split(/\s+/).length;
+  if (wordCount <= 6 && COMPOSITIONAL_ACK_RE.test(text)) return true;
+  // 3) Reactive feedback / correction of the previous reply. Screen is
+  //    not the source of new information here — the user is steering.
+  if (wordCount <= 12 && FEEDBACK_RE.test(text)) return true;
+  return false;
 }
 
 // Words that mean "talk about whatever is currently on my screen". If
@@ -314,6 +423,16 @@ function looksLikeMediaNoise(text: string): boolean {
     }
   } catch { /* ignore */ }
 
+  // Service or command-verb mention is enough signal that this is a real
+  // command, even when surrounding tokens got mistranscribed (Whisper
+  // routinely hears French/Spanish words for English ones — e.g.
+  // "Open my Gmail" → "pour ma Gmail.", "Show my email" → "Chao mi email.").
+  // The service name alone is the intent; don't drop on signal-word counts.
+  if (SERVICE_PATTERN.test(trimmed)) return false;
+  if (COMMAND_VERB_PATTERN.test(trimmed)) return false;
+  // Wake-word addressed turns are user intent regardless of signal words.
+  if (WAKE_PATTERN.test(trimmed)) return false;
+
   // 1) Non-Latin script density check
   // Matches CJK, Hiragana, Katakana, Cyrillic, Arabic, Thai, Hebrew, Devanagari
   const nonLatinRe = /[\u0400-\u04FF\u0590-\u05FF\u0600-\u06FF\u0900-\u097F\u0E00-\u0E7F\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]/g;
@@ -333,6 +452,37 @@ function looksLikeMediaNoise(text: string): boolean {
   }
 
   return false;
+}
+
+// Architectural backstop for the LLM say-do gap (the model emits "I'll do
+// X" prose without the matching tool call). We detect forward-looking
+// commitments paired with action verbs that map to real tools, so a turn
+// finishing with commitment + tool_calls=0 can be nudged back to action.
+// Pure descriptive answers ("here's what the article says") don't match.
+const SAYDO_COMMIT_RE =
+  /\b(?:i(?:'|\u2019)ll|i will|let me|let'?s|i(?:'|\u2019)m going to|here we go|here you go|on it|drafting|proposing|installing|fetching|building|creating|reading|opening|switching)\b/i;
+const SAYDO_ACTION_RE =
+  /\b(?:build|create|draft|propose|generate|install|fetch|read|open|focus|switch|send|write|search|look\s+up|look\s+for|check|watch|register|set\s+up|fix|repair|navigate|click|press|type|tool|plugin|article|url|inbox|tab|page|file|gmail|calendar|chrome|safari|notes|messages|slack|discord)\b/i;
+// Memory / feedback acks — the model accepts a correction or commits to a
+// future-behavior change. These look like commitments ("I'll remember")
+// but require ZERO tool calls; they're a valid reply to "don't do that
+// again". Without this exclusion, the say-do nudge fires a second
+// response.create that re-runs the prior wrong answer (#repeated).
+const SAYDO_MEMORY_ACK_RE =
+  /\b(?:i(?:'|\u2019)ll\s+(?:remember|keep\s+(?:that|this)\s+in\s+mind|make\s+a\s+(?:mental\s+)?note|try|be\s+(?:more\s+)?careful|avoid|stop)|noted(?:,?\s+sir)?|understood(?:,?\s+sir)?|got\s+it|i\s+see|apologies|sorry|my\s+(?:mistake|apologies))\b/i;
+// Phrases that frame what follows as descriptive analysis, not a future
+// action. "Save" matched too aggressively on "saves time" / "savings" —
+// hence dropped from SAYDO_ACTION_RE entirely; "remember" stays out for
+// the same reason.
+function looksLikeUnactedCommitment(text: string): boolean {
+  if (!text || text.length < 8) return false;
+  // Strip quoted spans — "I'll" inside a quote is reporting speech, not
+  // a commitment by Samuel.
+  const stripped = text.replace(/"[^"]*"|"[^"]*"/g, " ");
+  // Memory/feedback acks are NOT action commitments — they finish the
+  // turn correctly with zero tool calls.
+  if (SAYDO_MEMORY_ACK_RE.test(stripped)) return false;
+  return SAYDO_COMMIT_RE.test(stripped) && SAYDO_ACTION_RE.test(stripped);
 }
 
 interface ConversationTurn {
@@ -439,6 +589,9 @@ export function useRealtime(): UseRealtimeReturn {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rotationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isRotatingRef = useRef(false);
+  // Promise chain that serializes session.updateAgent() calls so the
+  // initial-connect path and plugin-reload path can't tangle if they overlap.
+  const agentUpdateChainRef = useRef<Promise<void>>(Promise.resolve());
 
   // Pre-fetched ephemeral key — start the API call before connect() to overlap latency
   const prefetchedKeyRef = useRef<Promise<string> | null>(null);
@@ -473,6 +626,11 @@ export function useRealtime(): UseRealtimeReturn {
   // Hash of the last AX text we injected. We skip re-injection when the
   // screen hasn't materially changed — the model already has it.
   const lastAxHashRef = useRef<string>("");
+  // Wallclock of the last successful context inject. When AX is unchanged
+  // AND the previous inject is still recent, we skip re-injection entirely
+  // (saves ~1.3s of capture+upload latency every turn). The screenshot is
+  // still in conversation history; the model can reference it.
+  const lastInjectAtRef = useRef<number>(0);
 
   // Deferred-context state: speech_stopped sets this up but waits for the
   // transcript before deciding whether to capture+inject screen data.
@@ -493,10 +651,6 @@ export function useRealtime(): UseRealtimeReturn {
   // bypass this gate.
   const passiveListeningRef = useRef(false);
 
-  // Latest tool result text — used by the no-hallucination guardrail to
-  // verify that specific names/subjects Samuel speaks actually appear in
-  // the most recent tool output.
-  const lastToolResultRef = useRef<{ name: string; text: string; ts: number } | null>(null);
   // True while a response is being generated (audio may still be playing).
   // Mic stays muted until this goes false + delay, preventing mid-sentence cutoff.
   const responseInProgressRef = useRef(false);
@@ -507,6 +661,29 @@ export function useRealtime(): UseRealtimeReturn {
   const wakeWordModeRef = useRef(false);
   const suppressIdleRef = useRef(false);
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks whether passive listening was auto-engaged by the idle timer (vs
+  // explicitly via the set_listening_mode tool). Auto-engaged passive should
+  // self-disengage on the next wake-word turn; explicit passive must be
+  // turned off by the user.
+  const autoPassiveRef = useRef(false);
+  // Count of consecutive transcripts dropped as media noise. When this hits
+  // MEDIA_NOISE_PASSIVE_THRESHOLD we auto-arm passive listening so background
+  // video / TV doesn't keep eating the mic and freezing the UI on "thinking".
+  // Any clean transcript resets the counter.
+  const mediaNoiseStreakRef = useRef(0);
+  const MEDIA_NOISE_PASSIVE_THRESHOLD = 2;
+  // Say-do guard: true once we've nudged Samuel for a commitment-without-
+  // tool-call this user-turn. Reset on the next speech_stopped so the
+  // nudge fires at most once per turn (no infinite re-prompt loop).
+  const saydoRetriedRef = useRef(false);
+  const saydoNudgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-Reflexion: capture structural tool failures as long-term lessons.
+  // Each entry keyed by `${tool}:${error_type}:${try_instead}` so the same
+  // pattern persists once per session. Cap total auto-lessons to keep noise
+  // out of the corrections store; transient/user-fault errors never persist.
+  const autoLessonsThisSessionRef = useRef<Set<string>>(new Set());
+  const AUTO_LESSON_CAP = 5;
 
   const clearInactivityTimer = () => {
     if (inactivityTimerRef.current) {
@@ -515,8 +692,40 @@ export function useRealtime(): UseRealtimeReturn {
     }
   };
 
-  // No client-side inactivity timer — once awake, Samuel stays listening.
-  const startInactivityTimer = () => {};
+  // After AUTO_PASSIVE_TIMEOUT_MS of post-response idle, auto-arm the
+  // wake-word gate so ambient speech (the user talking to someone else, a
+  // video playing, room noise that survived VAD) doesn't get treated as a
+  // command. Wake word ("Samuel") on the next turn auto-disengages it; the
+  // user does not have to manually un-passive. Manual passive (the
+  // set_listening_mode tool) is independent and left alone here.
+  //
+  // 30s is a deliberate balance: long enough not to interrupt natural
+  // pause-then-follow-up, short enough that "you find the flight while I go
+  // to the kitchen" actually catches the kitchen conversation.
+  const AUTO_PASSIVE_TIMEOUT_MS = 30_000;
+
+  // Single source of truth for engaging auto-passive (wake-word gate).
+  // Both the idle timer and the media-noise streak detector funnel through
+  // this so engagement never fires twice and the status message stays
+  // consistent.
+  const armAutoPassive = useCallback((reason: string, statusMessage?: string) => {
+    if (passiveListeningRef.current) return false;
+    passiveListeningRef.current = true;
+    autoPassiveRef.current = true;
+    debugLog("listening-mode", `auto-armed wake-word gate (${reason})`);
+    if (statusMessage) {
+      setTranscript((prev) => [...prev, makeEntry("status", statusMessage)]);
+    }
+    return true;
+  }, []);
+
+  const startInactivityTimer = () => {
+    clearInactivityTimer();
+    inactivityTimerRef.current = setTimeout(() => {
+      inactivityTimerRef.current = null;
+      armAutoPassive(`idle ${AUTO_PASSIVE_TIMEOUT_MS}ms`);
+    }, AUTO_PASSIVE_TIMEOUT_MS);
+  };
 
   const stopKeepalive = useCallback(() => {
     if (heartbeatRef.current) {
@@ -528,6 +737,59 @@ export function useRealtime(): UseRealtimeReturn {
       rotationTimerRef.current = null;
     }
   }, []);
+
+  // Single source of truth for building the updated agent (plugins + memory).
+  // Both the initial-connect path and `doReloadPlugins()` route through this
+  // so the two paths can't drift on prompt-suffix wording or memory-injection
+  // logic. Concurrent updates are serialized through `agentUpdateChainRef`
+  // so a plugin reload arriving mid-connect can't tangle with the initial
+  // updateAgent() call.
+  const buildUpdatedAgent = useCallback(async (
+    reason: "connect" | "plugin-reload",
+  ): Promise<{ agent: RealtimeAgent; pluginCount: number; memoryChars: number; learningLang: string | null }> => {
+    const [pluginTools, memoryCtx] = await Promise.all([
+      loadAllPlugins().catch((err) => { console.error("[plugins] load failed:", err); return [] as FunctionTool[]; }),
+      invoke<string>("memory_get_context").catch(() => ""),
+    ]);
+    const coreTools = samuelAgent.tools as FunctionTool[];
+    const tools = pluginTools.length > 0 ? mergeTools(coreTools, pluginTools) : coreTools;
+    let instructions = samuelAgent.instructions as string;
+    if (memoryCtx && memoryCtx !== "No prior context.") {
+      instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.\nIMPORTANT: Regardless of any language content in memory above, you MUST speak in ENGLISH unless the user explicitly asks otherwise.`;
+    }
+    // Only the initial connect re-detects learning language — plugin reload
+    // must not clobber whatever the user toggled mid-session.
+    const learningLang = reason === "connect"
+      ? (memoryCtx.match(/proficiency:(\w+)/i)?.[1] ?? null)
+      : null;
+    const agent = new RealtimeAgent({
+      name: samuelAgent.name,
+      instructions,
+      tools,
+      voice: "ash",
+    });
+    return { agent, pluginCount: pluginTools.length, memoryChars: memoryCtx.length, learningLang };
+  }, []);
+
+  const applyAgentUpdate = useCallback((reason: "connect" | "plugin-reload"): Promise<void> => {
+    const next = agentUpdateChainRef.current.then(async () => {
+      const target = sessionRef.current;
+      if (!target) return;
+      try {
+        const built = await buildUpdatedAgent(reason);
+        await target.updateAgent(built.agent);
+        if (built.learningLang) {
+          console.log(`[session] auto-detected learning language: ${built.learningLang}`);
+          notifyLearningLanguage(built.learningLang);
+        }
+        console.log(`[session] agent updated (${reason}): ${built.pluginCount} plugin(s), memory=${built.memoryChars > 0 ? "yes" : "no"}`);
+      } catch (err) {
+        console.error(`[session] agent update failed (${reason}):`, err);
+      }
+    });
+    agentUpdateChainRef.current = next;
+    return next;
+  }, [buildUpdatedAgent]);
 
   // Record a conversation turn into the rolling context buffer
   const recordTurn = useCallback((role: "user" | "assistant", text: string) => {
@@ -571,7 +833,15 @@ export function useRealtime(): UseRealtimeReturn {
 
     const session = new RealtimeSession(samuelAgent, {
       transport,
-      model: "gpt-realtime",
+      // gpt-realtime-2 (released May 7, 2026) — GPT-5-class reasoning,
+      // 128k context, configurable reasoning effort, stronger instruction
+      // following, more reliable tool use, and trained specifically on
+      // mid-conversation corrections (the "do it yourself" failure mode).
+      // The bundled SDK type list lags but the model name string is accepted
+      // via `(string & {})`. Cost: $4/$24 text, $32/$64 audio per 1M tokens.
+      // Docs: https://developers.openai.com/api/docs/models/gpt-realtime-2
+      //       https://developers.openai.com/api/docs/guides/realtime-models-prompting
+      model: "gpt-realtime-2",
       // Output guardrails — cut off unsafe/unwanted speech mid-generation
       outputGuardrails,
       outputGuardrailSettings: { debounceTextLength: 150 },
@@ -587,18 +857,56 @@ export function useRealtime(): UseRealtimeReturn {
         return `Tool "${toolName}" error: ${defaultMessage}. Try a different approach or tell the user.`;
       },
       config: {
+        // Reasoning effort for gpt-realtime-2. OpenAI's Realtime 2.0 prompting
+        // guide: "Start with reasoning.effort: 'low'. Increase only for
+        // workflows that require deeper planning." 'low' gives Samuel
+        // GPT-5-class reasoning for tool selection / SAY-DO discipline /
+        // entity capture without a meaningful latency hit. The SDK type
+        // doesn't expose `reasoning` yet (clientMessages.d.ts:82-90), but
+        // `providerData` is forwarded verbatim into the session payload
+        // (openaiRealtimeBase.js:418). Bump to 'medium' if the agent still
+        // commits without acting on multi-step requests.
+        // Docs: https://developers.openai.com/api/docs/guides/realtime-models-prompting#set-reasoning-effort
+        providerData: {
+          reasoning: { effort: "low" },
+        },
         audio: {
           input: {
             transcription: {
-              model: "gpt-4o-mini-transcribe",
+              // gpt-4o-transcribe is significantly more accurate than -mini on
+              // short clips (1-3s commands), where -mini frequently hallucinates
+              // non-English scripts even with `language: "en"` set. The cost
+              // bump is small for a voice-first agent.
+              model: "gpt-4o-transcribe",
               language: "en",
+              // Whisper-style bias prompt. Without this, on very short or
+              // noisy audio the transcriber ignores the language hint and
+              // emits gibberish in random scripts (e.g. "我們馬幾咩?"). The
+              // prompt anchors the decoder in our domain vocabulary so it
+              // commits to English even when confidence is low.
+              // Whisper bias prompt. HARD LIMIT: 1024 chars. If it overflows,
+              // the entire session.update is rejected and Samuel comes up with
+              // no tools and no instructions (default Realtime persona).
+              // Keep terse keyword-style. Static-asserted below.
+              prompt: TRANSCRIPTION_BIAS_PROMPT,
             },
             noiseReduction: { type: "far_field" },
+            // Server-VAD tuning (OpenAI canonical defaults: threshold 0.5,
+            // prefix_padding_ms 300, silence_duration_ms 500).
+            // Docs: https://developers.openai.com/api/docs/guides/realtime-vad#server-vad
+            //
+            // We previously ran threshold:0.9 / silence:1200 to suppress
+            // false positives, but combined with `far_field` noise reduction
+            // (already aggressive) those values clipped low-energy onsets
+            // ("how", "where", "what") and added 700ms of latency every turn.
+            // With the front of the utterance gone, the bias prompt could
+            // pull "...you doing" → "do it". Settle near canonical with a
+            // small safety margin over the defaults.
             turnDetection: {
               type: "server_vad",
-              threshold: 0.9,
-              prefixPaddingMs: 300,
-              silenceDurationMs: 1200,
+              threshold: 0.6,
+              prefixPaddingMs: 400,
+              silenceDurationMs: 700,
               // CRITICAL: do NOT auto-respond on speech_stopped.
               // We manually trigger response.create AFTER injecting AX tree + screenshot,
               // so the model has full context before generating its reply.
@@ -625,7 +933,12 @@ export function useRealtime(): UseRealtimeReturn {
     // drops VAD-triggered turns that don't address Samuel by name.
     registerSetPassiveListening((passive: boolean) => {
       passiveListeningRef.current = passive;
-      debugLog("listening-mode", passive ? "PASSIVE — ignore mic until addressed" : "NORMAL — auto-respond to clear speech");
+      // Explicit toggle wins — clear the auto-passive flag either way so
+      // the next wake-word turn doesn't accidentally cancel a deliberate
+      // user choice.
+      autoPassiveRef.current = false;
+      clearInactivityTimer();
+      debugLog("listening-mode", passive ? "PASSIVE (manual) — ignore mic until addressed" : "NORMAL — auto-respond to clear speech");
     });
 
     // Register discard-last-turn handler. The user said something like
@@ -747,11 +1060,9 @@ export function useRealtime(): UseRealtimeReturn {
         ? (resultStr.length > previewLen ? resultStr.slice(0, previewLen) + `...(+${resultStr.length - previewLen} more)` : resultStr)
         : "(empty)";
       debugLog("tool-call", `END   ${toolName} (${resultStr.length} chars) result=${preview}`);
-      // Track latest tool result so the no-hallucination guardrail can verify
-      // Samuel's claims against actual content.
-      const toolRecord = { name: toolName, text: resultStr, ts: Date.now() };
-      lastToolResultRef.current = toolRecord;
-      updateLatestToolResult(toolRecord);
+      // Publish the latest tool result so the no-hallucination guardrail can
+      // verify Samuel's spoken claims against actual content.
+      updateLatestToolResult({ name: toolName, text: resultStr, ts: Date.now() });
 
       // Tools that read or mutate screen state make the auto-injected context
       // stale (e.g. AX captured Chrome on Discord; switch_browser_tab moves
@@ -775,7 +1086,62 @@ export function useRealtime(): UseRealtimeReturn {
         } catch { /* may already be gone */ }
         lastScreenItemIdRef.current = null;
         lastAxHashRef.current = "";
+        lastInjectAtRef.current = 0;
       }
+
+      // Auto-Reflexion: turn structural tool failures into a persisted lesson
+      // so future sessions don't repeat the same dead-end. We only persist
+      // architectural errors (permission denied, focus lost, action invalid,
+      // capability unavailable, hard system/AX error) — never transient
+      // not_found / network / timeout / empty / user-fault input errors,
+      // because those are state-of-the-world artifacts, not learnable bugs.
+      try {
+        const trimmed = resultStr.trim();
+        if (trimmed.startsWith("{") && trimmed.includes('"ok"')) {
+          const parsed = JSON.parse(trimmed) as {
+            ok?: boolean;
+            error_type?: string;
+            message?: string;
+            try_instead?: string | null;
+          };
+          if (parsed.ok === false && typeof parsed.error_type === "string") {
+            const STRUCTURAL_ERRORS = new Set([
+              "permission",
+              "unavailable",
+              "system_error",
+              "ax_error",
+              "invalid_action",
+              "focus_lost",
+              "rejected",
+            ]);
+            const errType = parsed.error_type;
+            const tryInstead = parsed.try_instead?.trim() ?? "";
+            const shortMsg = (parsed.message ?? "").slice(0, 140);
+            // Need a try_instead hint — without one there's no actionable
+            // next step to encode as a lesson, just a state report.
+            if (STRUCTURAL_ERRORS.has(errType) && tryInstead.length > 0) {
+              const key = `${toolName}:${errType}:${tryInstead.slice(0, 60)}`;
+              if (
+                !autoLessonsThisSessionRef.current.has(key) &&
+                autoLessonsThisSessionRef.current.size < AUTO_LESSON_CAP
+              ) {
+                autoLessonsThisSessionRef.current.add(key);
+                const lesson =
+                  `When ${toolName} returns ${errType}` +
+                  (shortMsg ? ` ("${shortMsg}")` : "") +
+                  `, prefer: ${tryInstead}.`;
+                debugLog("reflexion", `auto-lesson from ${toolName}: ${lesson}`);
+                invoke("memory_add_correction", {
+                  what: lesson,
+                  source: "auto-reflexion",
+                }).catch((err: unknown) =>
+                  console.warn("[reflexion] persist failed:", err),
+                );
+              }
+            }
+          }
+        }
+      } catch { /* non-JSON tool result — skip */ }
     });
 
     // Guardrail tripped — Samuel said something he shouldn't have.
@@ -814,15 +1180,6 @@ export function useRealtime(): UseRealtimeReturn {
         // MCP / non-function approvals — auto-approve silently
         session.approve(request.approvalItem).catch(() => {});
       }
-    });
-
-    // Agent handoff — log when Samuel delegates to a specialist
-    session.on("agent_handoff", (_ctx, fromAgent, toAgent) => {
-      console.log(`[handoff] ${fromAgent.name} → ${toAgent.name}`);
-      setTranscript((prev) => [
-        ...prev,
-        makeEntry("status", `[${toAgent.name} active]`),
-      ]);
     });
 
     // History events — keep SDK history as source of truth for debugging
@@ -893,12 +1250,26 @@ export function useRealtime(): UseRealtimeReturn {
       const pastGreeting = agentResponseCountRef.current >= 1;
 
       // Reason 0 (highest priority): passive listening — user told Samuel
-      // "that's the video, not me". Drop the turn unless they explicitly
-      // address him. The audio is still committed to conversation history,
-      // so when they DO address him later, he can reference what was said.
-      if (passiveListeningRef.current && transcript && !addressesSamuel(transcript)) {
-        debugLog("listening-mode", `passive: dropping "${transcript}" (no wake phrase)`);
-        return;
+      // "that's the video, not me", or the auto-arm timer engaged after
+      // post-response idle. Drop the turn unless they explicitly address
+      // him. The audio is still committed to conversation history, so when
+      // they DO address him later, he can reference what was said.
+      if (passiveListeningRef.current && transcript) {
+        if (!addressesSamuel(transcript)) {
+          debugLog(
+            "listening-mode",
+            `${autoPassiveRef.current ? "auto-passive" : "passive"}: dropping "${transcript}" (no wake phrase)`,
+          );
+          return;
+        }
+        // Wake word present — auto-disengage if it was the timer that
+        // armed passive. Manual passive (user said "go quiet") stays on
+        // until the user turns it off explicitly.
+        if (autoPassiveRef.current) {
+          passiveListeningRef.current = false;
+          autoPassiveRef.current = false;
+          debugLog("listening-mode", `wake word in "${transcript}" — exiting auto-passive`);
+        }
       }
 
       // Reason 1: conversational ack — model has prior context, just respond
@@ -939,14 +1310,45 @@ export function useRealtime(): UseRealtimeReturn {
       Promise.all([axPromise, shotPromise]).then(([axText, shot]) => {
         if (!sessionRef.current) return;
 
-        const truncated = axText && axText.length > 6000
-          ? axText.slice(0, 6000) + "\n...(truncated)"
-          : axText ?? "";
-        // Hash only the truncated payload — that's what the model would see.
-        const axHash = truncated ? cheapHash(truncated) : "";
+        // Hash the FULL AX payload, not just the prefix. The first 6KB of
+        // a Chrome window is mostly toolbar / sidebar / tabs and rarely
+        // changes; hashing only the prefix would hide real article-content
+        // changes and falsely report "unchanged".
+        const fullAx = axText ?? "";
+        const axHash = fullAx ? cheapHash(fullAx) : "";
         const axChanged = !!axHash && axHash !== lastAxHashRef.current;
 
-        // Reason 3: nothing new on screen — skip injection entirely
+        // Truncate AFTER hashing so the model sees more actual content.
+        // 24KB ≈ 6K tokens, well within Realtime context budget. The old
+        // 6KB ceiling never let the article body through — the model was
+        // reduced to OCR'ing the JPEG, which produced wrong-paragraph
+        // hallucinations on long pages.
+        const AX_INJECT_BUDGET = 24_000;
+        const truncated = fullAx.length > AX_INJECT_BUDGET
+          ? fullAx.slice(0, AX_INJECT_BUDGET) + "\n...(truncated)"
+          : fullAx;
+
+        // Reason 3a: AX is byte-identical to the last inject AND we injected
+        // recently. Even if a screenshot is available, sending it again is
+        // pure waste — the prior screenshot+AX is still in conversation
+        // history and the model can reference it. Saves ~1.3s + ~150KB.
+        const sinceLastInject = lastInjectAtRef.current === 0
+          ? Number.POSITIVE_INFINITY
+          : now - lastInjectAtRef.current;
+        if (
+          !axChanged &&
+          lastScreenItemIdRef.current &&
+          sinceLastInject < CTX_DEDUP_WINDOW_MS
+        ) {
+          debugLog(
+            "ctx",
+            `screen unchanged + recent inject (${Math.round(sinceLastInject)}ms ago) — skipping`,
+          );
+          triggerResponse();
+          return;
+        }
+
+        // Reason 3b: nothing on screen at all (no AX, no screenshot)
         if (!axChanged && !shot?.base64) {
           debugLog("ctx", `screen unchanged (hash=${axHash}) — skipping inject`);
           triggerResponse();
@@ -988,9 +1390,10 @@ export function useRealtime(): UseRealtimeReturn {
             });
             lastScreenItemIdRef.current = itemId;
             lastAxHashRef.current = axHash;
+            lastInjectAtRef.current = now;
             debugLog(
               "ctx",
-              `injected AX(${axText?.length ?? 0} chars, changed=${axChanged}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
+              `injected AX(${axText?.length ?? 0} chars, sent=${truncated.length}, changed=${axChanged}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
             );
           } catch (e) {
             debugLog("ctx", `inject failed: ${e}`, "warn");
@@ -1047,6 +1450,13 @@ export function useRealtime(): UseRealtimeReturn {
 
         case "input_audio_buffer.speech_stopped":
           setAgentState("thinking");
+          // Fresh user turn — clear the say-do retry flag so the next
+          // commitment-without-tool case can trigger a single nudge.
+          saydoRetriedRef.current = false;
+          if (saydoNudgeTimerRef.current) {
+            clearTimeout(saydoNudgeTimerRef.current);
+            saydoNudgeTimerRef.current = null;
+          }
           debugLog("turn", "speech_stopped — waiting for transcript to decide on context");
           // We DEFER the heavy AX read + screenshot until we know what the user
           // actually said. Conversational acks like "sounds good" don't need a
@@ -1115,8 +1525,29 @@ export function useRealtime(): UseRealtimeReturn {
               }
               debugLog("turn", "pending turn cancelled (echo/noise/media)");
             }
+            // Crucial: speech_stopped flipped agentState → "thinking". Without
+            // this, the UI stays stuck on "thinking" forever after a drop.
+            if (!responseInProgressRef.current) {
+              setAgentState("listening");
+            }
+            // Auto-arm wake-word gate when media keeps interfering. Continuous
+            // video/TV otherwise floods the mic with noise the user can't talk
+            // through. The next "Samuel" / "Sammy" addressing-phrase exits
+            // passive automatically (see auto-passive logic above).
+            if (isMediaNoise) {
+              mediaNoiseStreakRef.current += 1;
+              if (mediaNoiseStreakRef.current >= MEDIA_NOISE_PASSIVE_THRESHOLD) {
+                armAutoPassive(
+                  `${mediaNoiseStreakRef.current} media-noise drops`,
+                  "Background media detected \u2014 say \u201cSamuel\u201d to address me.",
+                );
+              }
+            }
             break;
           }
+          // Clean transcript reaching this point — reset the media streak so
+          // a single intervening user turn re-enables auto-listen behaviour.
+          mediaNoiseStreakRef.current = 0;
 
           recordTurn("user", text);
           if (pendingId) {
@@ -1211,6 +1642,66 @@ export function useRealtime(): UseRealtimeReturn {
           responseInProgressRef.current = false;
           setAgentState("listening");
 
+          // SAY-DO BACKSTOP: prompt rules are fragile because the model
+          // generates prose and tool calls in the same forward pass with
+          // no binding between them (see "The Acknowledgment-Action Gap",
+          // tianpan.co 2026). When a completed response committed to an
+          // action ("I'll create that tool", "let me read the article",
+          // "here we go") but emitted zero tool calls, we inject a
+          // corrective system message and trigger a fresh response. Once
+          // per user-turn — saydoRetriedRef resets on the next speech
+          // event so we never enter a retry loop.
+          if (
+            respStatus === "completed" &&
+            toolCalls.length === 0 &&
+            !saydoRetriedRef.current &&
+            looksLikeUnactedCommitment(finalText)
+          ) {
+            saydoRetriedRef.current = true;
+            debugLog(
+              "saydo",
+              `commitment with tool_calls=0 detected: "${finalText.slice(0, 120)}"`,
+            );
+            // Wait for current audio to finish playing before nudging,
+            // otherwise the user hears two responses overlap.
+            if (saydoNudgeTimerRef.current) clearTimeout(saydoNudgeTimerRef.current);
+            saydoNudgeTimerRef.current = setTimeout(() => {
+              saydoNudgeTimerRef.current = null;
+              // If the user has spoken / a new response is in flight,
+              // skip the nudge — they're already correcting Samuel.
+              if (responseInProgressRef.current) {
+                debugLog("saydo", "skipping nudge — response in progress");
+                return;
+              }
+              try {
+                const id = `saydo_${Date.now()}`;
+                sessionRef.current?.transport.sendEvent({
+                  type: "conversation.item.create",
+                  item: {
+                    id,
+                    type: "message",
+                    role: "system",
+                    content: [
+                      {
+                        type: "input_text",
+                        text:
+                          "[Say-do guard] Your last reply committed to an action " +
+                          "but emitted zero tool calls. Either call the matching " +
+                          "tool now (web_browse, plugin_manage, watch_for, read_app, " +
+                          "etc. per the SAY-DO RULE) — or say in one short sentence " +
+                          "why you can't and stop. Do NOT repeat your previous answer.",
+                      },
+                    ],
+                  },
+                });
+                sessionRef.current?.transport.sendEvent({ type: "response.create" });
+                debugLog("saydo", "nudge sent + response.create triggered");
+              } catch (e) {
+                debugLog("saydo", `nudge failed: ${e}`, "warn");
+              }
+            }, 1200);
+          }
+
           // NOW unmute — the full response has been generated and audio
           // buffers are flushing. Delay lets remaining audio play out.
           if (!userMutedRef.current && session.muted === true) {
@@ -1296,33 +1787,9 @@ export function useRealtime(): UseRealtimeReturn {
       session.sendMessage(text);
     });
 
-    // Plugin reload: loads all dynamic plugins and updates the live agent.
-    // Also re-injects memory so it's not lost when tools are updated.
-    const doReloadPlugins = async () => {
-      try {
-        const [pluginTools, memoryCtx] = await Promise.all([
-          loadAllPlugins(),
-          invoke<string>("memory_get_context").catch(() => ""),
-        ]);
-        const coreTools = samuelAgent.tools as FunctionTool[];
-        const merged = mergeTools(coreTools, pluginTools);
-        let instructions = samuelAgent.instructions as string;
-        if (memoryCtx && memoryCtx !== "No prior context.") {
-          instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.\nIMPORTANT: Regardless of any language content in memory above, you MUST speak in ENGLISH unless the user explicitly asks otherwise.`;
-        }
-        const updatedAgent = new RealtimeAgent({
-          name: samuelAgent.name,
-          instructions,
-          tools: merged,
-          voice: "ash",
-        });
-        await session.updateAgent(updatedAgent);
-        console.log(`[plugins] agent updated: ${merged.length} tools (${pluginTools.length} from plugins), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
-      } catch (err) {
-        console.error("[plugins] reload failed:", err);
-      }
-    };
-    registerReloadPlugins(doReloadPlugins);
+    // Plugin reload routes through the hook-level `applyAgentUpdate` so the
+    // initial-connect path and reload path share the same builder + chain ref.
+    registerReloadPlugins(() => applyAgentUpdate("plugin-reload"));
 
     // Register the image bridge so tools can inject screenshots.
     // Uses SDK's addImage() — cleaner, handles encoding and error recovery.
@@ -1365,23 +1832,50 @@ export function useRealtime(): UseRealtimeReturn {
       session.sendMessage(text);
     });
 
-    // Inject PCM16 audio clips directly into the session so the model can hear
-    // system audio (anime, games, videos) rather than just reading transcripts.
-    registerSendAudioClip((pcmBase64: string, contextText?: string) => {
-      const content: Array<Record<string, string>> = [];
-      if (contextText) {
-        content.push({ type: "input_text", text: contextText });
+    // In-session correction injection (Reflexion loop). When `record_correction`
+    // fires, push the lesson onto the conversation timeline as a system message
+    // so the model applies it on the very next turn — no full reconnect, no
+    // prompt rebuild, no instruction-update reliability bug.
+    //
+    // Cap per-session lessons so a runaway loop (e.g. correction-of-correction)
+    // can't balloon the context window. Persistent lessons are still re-injected
+    // at session start via the system prompt prefix, so dropping in-session
+    // duplicates here is purely a context-size guard.
+    const SESSION_LESSON_CAP = 25;
+    const sessionLessons = new Set<string>();
+    registerInjectCorrection((lesson: string) => {
+      const trimmed = lesson.trim();
+      if (!trimmed) return;
+      const fingerprint = trimmed.toLowerCase().replace(/\s+/g, " ").slice(0, 200);
+      if (sessionLessons.has(fingerprint)) {
+        console.log("[reflexion] dropped duplicate in-session lesson");
+        return;
       }
-      content.push({ type: "input_audio", audio: pcmBase64 });
+      if (sessionLessons.size >= SESSION_LESSON_CAP) {
+        console.log(`[reflexion] hit per-session lesson cap (${SESSION_LESSON_CAP}) — dropping`);
+        return;
+      }
+      sessionLessons.add(fingerprint);
+      const id = `lesson_${Date.now()}`;
       session.transport.sendEvent({
         type: "conversation.item.create",
         item: {
+          id,
           type: "message",
-          role: "user",
-          content,
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: `LESSON LEARNED (apply going forward, do not repeat the mistake): ${trimmed}`,
+            },
+          ],
         },
       });
     });
+
+    // PCM audio injection (sendAudioClip) was removed in commit dea376f after
+    // it confused the model's language detection. The bridge slot is left
+    // unfilled by design — restore only after the language issue is solved.
 
     return () => {
       registerSendImage(null);
@@ -1389,9 +1883,9 @@ export function useRealtime(): UseRealtimeReturn {
       registerScreenTarget(null);
       registerSendSilentContext(null);
       registerSendTextAndRespond(null);
-      registerSendAudioClip(null);
       registerReloadPlugins(null);
       registerDiscardLastTurn(null);
+      registerInjectCorrection(null);
       stopKeepalive();
       session.close();
       sessionRef.current = null;
@@ -1503,81 +1997,60 @@ export function useRealtime(): UseRealtimeReturn {
         const now = new Date();
         const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Greet the user in ENGLISH with one short sentence. You MUST speak English.]`;
 
-        // Load saved skills and inject summaries so Samuel knows what workflows are available
+        // Load saved skills and inject summaries so Samuel knows what workflows are available.
+        // Skill content is user-authored — sanitize before splicing into a system message
+        // so backticks, brackets, or accidental newlines can't break the surrounding markup.
+        const sanitizeForInline = (s: string) =>
+          s.replace(/[\r\n]+/g, " ").replace(/[`\[\]]/g, "").trim();
         invoke<Array<{ id: string; title: string; trigger: string; summary: string }>>("skill_list_summaries")
           .then((skills) => {
             let fullCtx = timeCtx;
             if (skills.length > 0) {
-              const listing = skills.map((s) => `- ${s.title} [${s.id}]: ${s.summary} (trigger: ${s.trigger})`).join("\n");
+              const listing = skills
+                .map((s) => `- ${sanitizeForInline(s.title)} (id: ${sanitizeForInline(s.id)}): ${sanitizeForInline(s.summary)} (trigger: ${sanitizeForInline(s.trigger)})`)
+                .join("\n");
               fullCtx += `\n[System: You have ${skills.length} saved skill(s). Before complex tasks, check if one applies:\n${listing}\nUse skill_manage(action="get", id="...") to load the full steps.]`;
               console.log(`[skills] injected ${skills.length} skill summaries into session`);
             }
-            // Single sendMessage triggers the greeting response
             session.sendMessage(fullCtx);
           })
           .catch(() => {
-            // Skills failed, just send time context
             session.sendMessage(timeCtx);
           });
       }
 
       // Load plugins + inject persistent memory in one atomic updateAgent call.
-      // This avoids race conditions where two separate updateAgent calls overwrite each other.
-      const session_ = sessionRef.current;
-      if (session_) {
-        Promise.all([
-          loadAllPlugins().catch((err) => { console.error("[plugins] load failed:", err); return [] as FunctionTool[]; }),
-          invoke<string>("memory_get_context").catch(() => ""),
-        ]).then(([pluginTools, memoryCtx]) => {
-          const coreTools = samuelAgent.tools as FunctionTool[];
-          const tools = pluginTools.length > 0 ? mergeTools(coreTools, pluginTools) : coreTools;
-          let instructions = samuelAgent.instructions as string;
-
-          // Inject persistent memory so Samuel remembers across sessions
-          if (memoryCtx && memoryCtx !== "No prior context.") {
-            instructions += `\n\n# Persistent Memory (from previous sessions)\n${memoryCtx}\nFollow these memories strictly. Do not repeat vocabulary marked as known.\nIMPORTANT: Regardless of any language content in memory above, you MUST speak in ENGLISH unless the user explicitly asks otherwise.`;
-            console.log(`[memory] injecting ${memoryCtx.length} chars of persistent context`);
-          }
-
-          // Auto-detect learning language from memory
-          const langMatch = memoryCtx.match(/proficiency:(\w+)/i);
-          if (langMatch) {
-            console.log(`[session] auto-detected learning language: ${langMatch[1]}`);
-            notifyLearningLanguage(langMatch[1]);
-          }
-
-          // Single updateAgent call with both plugins and memory
-          const updatedAgent = new RealtimeAgent({
-            name: samuelAgent.name,
-            instructions,
-            tools,
-            voice: "ash",
-          });
-          session_.updateAgent(updatedAgent).then(() => {
-            console.log(`[session] agent updated: ${pluginTools.length} plugin(s), memory=${memoryCtx.length > 0 ? "yes" : "no"}`);
-          }).catch((err) => console.error("[session] updateAgent failed:", err));
-        });
+      // Serialized through buildUpdatedAgent + applyAgentUpdate so any later
+      // plugin reload can't race this initial setup.
+      if (sessionRef.current) {
+        applyAgentUpdate("connect");
       }
 
       // Start heartbeat — keeps the Realtime API connection alive during silence.
       // Also detects dead connections: if send throws, trigger auto-reconnect.
+      //
+      // Implementation note: we send a no-op `session.update` with only
+      // `type: "realtime"` because the API now rejects `session: {}` with
+      // missing_required_parameter. If a future SDK ships a dedicated ping,
+      // swap this for it. Any rejection (rather than transport-level throw)
+      // is logged loudly — silently absorbed errors caused us to ship a
+      // brittle heartbeat in the past.
       heartbeatRef.current = setInterval(() => {
-        if (sessionRef.current) {
-          try {
-            // The Realtime API now requires `session.type` on every
-            // session.update; an empty `session: {}` is rejected with
-            // missing_required_parameter. Send a no-op type-only update.
-            sessionRef.current.transport.sendEvent({
-              type: "session.update",
-              session: { type: "realtime" },
-            });
-          } catch {
-            console.warn("[heartbeat] send failed — connection dead, reconnecting");
-            stopKeepalive();
-            setStatus("disconnected");
-            setAgentState("idle");
-            setTimeout(() => { connectRef.current?.(); }, 1500);
-          }
+        const s = sessionRef.current;
+        if (!s) return;
+        try {
+          s.transport.sendEvent({
+            type: "session.update",
+            session: { type: "realtime" },
+          });
+        } catch (err) {
+          console.warn(
+            `[heartbeat] send failed (${err instanceof Error ? err.message : String(err)}) — reconnecting`,
+          );
+          stopKeepalive();
+          setStatus("disconnected");
+          setAgentState("idle");
+          setTimeout(() => { connectRef.current?.(); }, 1500);
         }
       }, HEARTBEAT_INTERVAL_MS);
 

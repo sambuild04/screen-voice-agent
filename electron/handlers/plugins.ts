@@ -87,7 +87,7 @@ export async function delete_plugin(args: { name: string }): Promise<string> {
 
 // ── Code generation (GPT-5.5 with reasoning) ────────────────────────────────
 
-const PLUGIN_SYSTEM_PROMPT = `You are a code generator for a Tauri desktop app plugin system.
+const PLUGIN_SYSTEM_PROMPT = `You are a code generator for a desktop app plugin system.
 Generate a JavaScript plugin file that will be executed via \`new Function("secrets", "invoke", "sleep", "ui", code)(...)\`.
 
 The plugin MUST follow this exact shape — use \`return { ... }\` at the top level:
@@ -118,7 +118,7 @@ return {
     //   fetch("https://r.jina.ai/" + url) — read any URL as clean LLM-friendly text (free, no key)
     //   fetch("https://s.jina.ai/" + encodeURIComponent(query)) — search the web (free, no key)
     //   secrets.get("key_name") — get a stored API key (returns Promise<string|null>)
-    //   invoke(command, args) — call Tauri backend commands (returns Promise<unknown>)
+    //   invoke(command, args) — call backend commands (returns Promise<unknown>)
     //     invoke("web_search", { query: "...", page: 1 }) — search the web
     //     invoke("web_read", { url: "..." }) — fetch and read a web page
     //     invoke("browser_command", { action: "open", params: { url: "..." } }) — control browser

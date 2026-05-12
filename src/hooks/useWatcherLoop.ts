@@ -1,37 +1,22 @@
 import { useEffect, useRef } from "react";
 import { invoke } from "../lib/invoke-bridge";
-import { sendTextAndRespond } from "../lib/session-bridge";
+import { runWatchEvaluation, type WatchAlert } from "../lib/watcher-eval";
 import type { ConnectionStatus } from "./useRealtime";
 
 const WATCHER_INTERVAL_MS = 20_000;
 
-interface WatchCheckMatch {
-  id: string;
-  description: string;
-  message_template: string;
-}
-
-interface ClassifierMatch {
-  watch_id: string;
-  description: string;
-  message_template: string;
-  detail: string;
-}
-
-interface WatchAlert {
-  id: string;
-  condition_type: string;
-  source: string;
-  enabled: boolean;
-}
-
 /**
  * Standalone watcher loop (Loop 2 of the ambient agent architecture).
  * Runs whenever the Realtime session is connected, regardless of learning mode.
- * Evaluates active triggers against screen content every cycle.
- * When learning mode is active, it defers to useLearningMode which handles
- * both audio + screen evaluation inline. This hook covers the gap when
- * learning mode is OFF but the user still has active triggers.
+ *
+ * Evaluates active triggers against screen content AND system-audio
+ * transcripts every cycle. The audio path is decoupled from learning mode:
+ * if any active watch declares source="audio" or "both", this hook acquires
+ * a watcher-side audio capture (refcounted on the Electron side, so it
+ * cohabits with learning mode) and transcribes a chunk per tick.
+ *
+ * When learning mode is active, this loop defers entirely — useLearningMode
+ * already evaluates both screen and audio inline on its own cadence.
  */
 export function useWatcherLoop(
   sessionStatus: ConnectionStatus,
@@ -46,13 +31,25 @@ export function useWatcherLoop(
   const screenWatchRef = useRef(screenWatchEnabled);
   screenWatchRef.current = screenWatchEnabled;
   const inFlightRef = useRef(false);
+  // Tracks whether we currently hold the watcher-side slot of the shared
+  // audio capture. Used to decide when to acquire/release per tick.
+  const audioHeldRef = useRef(false);
 
   useEffect(() => {
     if (sessionStatus !== "connected") return;
 
     const runWatcher = async () => {
       // Skip if learning mode is running (it handles watcher evaluation itself)
-      if (learningActiveRef.current) return;
+      if (learningActiveRef.current) {
+        // Learning mode owns the audio cycle now — release our slot if we
+        // were holding it, so the helper isn't kept alive unnecessarily
+        // when learning mode is the only active path.
+        if (audioHeldRef.current) {
+          await invoke("stop_watcher_audio").catch(() => {});
+          audioHeldRef.current = false;
+        }
+        return;
+      }
       if (inFlightRef.current) return;
 
       const state = agentStateRef.current;
@@ -66,17 +63,30 @@ export function useWatcherLoop(
         return;
       }
       const enabled = watches.filter((w) => w.enabled);
+
+      const hasScreenTriggers = enabled.some((w) => w.source === "screen" || w.source === "both");
+      const hasAudioTriggers = enabled.some((w) => w.source === "audio" || w.source === "both");
+
+      // Drive watcher audio capture lifecycle: acquire when needed, release
+      // when not. The Electron side refcounts so this composes with learning
+      // mode's audio capture without double-spawning the helper.
+      if (hasAudioTriggers && !audioHeldRef.current) {
+        await invoke("start_watcher_audio").catch(() => {});
+        audioHeldRef.current = true;
+        console.log("[watcher-standalone] acquired audio capture");
+      } else if (!hasAudioTriggers && audioHeldRef.current) {
+        await invoke("stop_watcher_audio").catch(() => {});
+        audioHeldRef.current = false;
+        console.log("[watcher-standalone] released audio capture");
+      }
+
       if (enabled.length === 0) return;
 
       inFlightRef.current = true;
 
       try {
-        const triggerMessages: string[] = [];
-        const seenIds = new Set<string>();
-
         // Screen content: capture and describe via GPT-4o-mini
         let screenText = "";
-        const hasScreenTriggers = enabled.some((w) => w.source === "screen" || w.source === "both");
         if (hasScreenTriggers && screenWatchRef.current) {
           try {
             screenText = await invoke<string>("check_screen_text") ?? "";
@@ -85,46 +95,20 @@ export function useWatcherLoop(
           }
         }
 
-        if (!screenText) {
-          inFlightRef.current = false;
-          return;
+        // Audio content: language-agnostic chunk via the watcher-side check
+        let audioText = "";
+        if (hasAudioTriggers && audioHeldRef.current) {
+          try {
+            const res = await invoke<{ transcript: string | null }>("check_watcher_audio");
+            audioText = res?.transcript ?? "";
+          } catch {
+            // check_watcher_audio may not exist yet on older builds; degrade silently
+          }
         }
 
-        // Tier 1: keyword triggers
-        const kwMatches = await invoke<WatchCheckMatch[]>("watch_check", {
-          text: screenText,
-          source: "screen",
-        }).catch(() => [] as WatchCheckMatch[]);
-
-        for (const m of kwMatches) {
-          if (seenIds.has(m.id)) continue;
-          seenIds.add(m.id);
-          triggerMessages.push(m.message_template || m.description);
-        }
-
-        // Tier 2: classifier triggers
-        const classifierMatches = await invoke<ClassifierMatch[]>(
-          "watch_evaluate_classifier",
-          { content: screenText, source: "screen" },
-        ).catch(() => [] as ClassifierMatch[]);
-
-        for (const m of classifierMatches) {
-          if (seenIds.has(m.watch_id)) continue;
-          seenIds.add(m.watch_id);
-          const msg = m.message_template
-            ? m.message_template.replace("{detail}", m.detail)
-            : `${m.description}: ${m.detail}`;
-          triggerMessages.push(msg);
-        }
-
-        if (triggerMessages.length > 0) {
-          console.log(`[watcher-standalone] ${triggerMessages.length} trigger(s) fired`);
-          sendTextAndRespond(
-            `[TRIGGER ALERT] The following watches just matched:\n` +
-            triggerMessages.map((m, i) => `${i + 1}. ${m}`).join("\n") +
-            `\n\nContext (screen): ${screenText}\n\n` +
-            `Briefly notify the user about what you detected. Be specific. Keep it to 1-2 sentences per trigger.`,
-          );
+        const { triggerCount } = await runWatchEvaluation({ audioText, screenText });
+        if (triggerCount > 0) {
+          console.log(`[watcher-standalone] ${triggerCount} trigger(s) fired`);
         }
       } catch (e) {
         console.error("[watcher-standalone] error:", e);
@@ -136,6 +120,14 @@ export function useWatcherLoop(
     const interval = setInterval(runWatcher, WATCHER_INTERVAL_MS);
     runWatcher();
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      // Release audio capture on unmount/disconnect so the helper can shut
+      // down if no other consumer is holding it.
+      if (audioHeldRef.current) {
+        invoke("stop_watcher_audio").catch(() => {});
+        audioHeldRef.current = false;
+      }
+    };
   }, [sessionStatus]);
 }

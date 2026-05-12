@@ -25,7 +25,7 @@ const COMMAND_TIMEOUT_MS = 60_000;
 
 function resolveProjectRoot(): string {
 	let dir = process.cwd();
-	if (dir.endsWith("src-tauri") || dir.endsWith("electron")) {
+	if (dir.endsWith("electron")) {
 		dir = join(dir, "..");
 	}
 	return dir;

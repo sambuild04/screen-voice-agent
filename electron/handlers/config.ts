@@ -53,7 +53,7 @@ export async function create_ephemeral_key(): Promise<string> {
 				"Content-Type": "application/json",
 			},
 			body: JSON.stringify({
-				session: { type: "realtime", model: "gpt-realtime" },
+				session: { type: "realtime", model: "gpt-realtime-2" },
 			}),
 		},
 	);

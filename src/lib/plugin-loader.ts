@@ -10,7 +10,7 @@
  *
  * Injected helpers available to all plugins:
  *   secrets.get("key_name")      → Promise<string | null>
- *   invoke(command, args)         → Promise<unknown>  (Tauri backend commands)
+ *   invoke(command, args)         → Promise<unknown>  (backend IPC commands)
  *   sleep(ms)                     → Promise<void>
  *   ui.set(component, prop, val)  → string  (change any UI property)
  *   ui.injectCSS(id, css)         → void    (add/replace a <style> block)
@@ -112,7 +112,7 @@ const uiHelper = {
         border: 1px solid rgba(99, 102, 241, 0.2); border-radius: 14px;
         padding: 12px; color: #e2e8f0; font-size: 13px;
         box-shadow: 0 0 20px rgba(99, 102, 241, 0.1);
-        animation: lyrics-hud-in 0.3s ease both;
+        animation: panel-fade-in 0.3s ease both;
         overflow-y: auto; max-height: 80vh;
       `;
       const pos = opts?.position ?? "right";

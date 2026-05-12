@@ -8,7 +8,6 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readConfigInternal } from "./config.js";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -258,32 +257,79 @@ function runDesktopAction(args: string[]): string {
 	}
 }
 
+// Returns the localized name of the currently frontmost app, or null if
+// the helper failed. Cheap (~10ms shell-out). Used by the focus guard
+// before every FALLBACK desktop_* call so we don't send keystrokes into
+// the wrong window after the user switched apps.
+function frontmostApp(): string | null {
+	try {
+		const out = execFileSync(findHelper("desktop-action"), ["frontmost-app"], {
+			encoding: "utf-8",
+			timeout: 2000,
+		}).trim();
+		return out && out !== "UNKNOWN" ? out : null;
+	} catch {
+		return null;
+	}
+}
+
+// Throws an Error whose .message is a JSON blob that the tool wrapper in
+// samuel.ts recognizes as a structured `focus_lost` error. The model is
+// instructed (in the prompt) to verbalize this rather than silently retry.
+function assertFocus(targetApp: string | undefined, action: string): void {
+	if (!targetApp) return; // backward-compat: callers without target_app skip the check
+	const focused = frontmostApp();
+	if (!focused) return; // can't determine — fail open
+	// Case-insensitive contains either way (target may be "Chrome" while the
+	// frontmost is "Google Chrome"; both match).
+	const fLower = focused.toLowerCase();
+	const tLower = targetApp.toLowerCase();
+	const match = fLower.includes(tLower) || tLower.includes(fLower);
+	if (match) return;
+	const payload = JSON.stringify({
+		ok: false,
+		kind: "focus_lost",
+		action,
+		focused_app: focused,
+		target_app: targetApp,
+		message: `User focus is on "${focused}", not "${targetApp}" — action skipped to avoid cross-app interference.`,
+	});
+	console.error(`[desktop] focus-guard blocked ${action}: focused=${focused} target=${targetApp}`);
+	throw new Error(payload);
+}
+
 export async function desktop_click(args: {
 	x: number;
 	y: number;
 	click_type?: string;
+	target_app?: string;
 }): Promise<string> {
+	assertFocus(args.target_app, "desktop_click");
 	const type = args.click_type || "click";
-	console.error(`[desktop] ${type} at (${args.x}, ${args.y})`);
+	console.error(`[desktop] ${type} at (${args.x}, ${args.y})${args.target_app ? ` target=${args.target_app}` : ""}`);
 	return runDesktopAction([type, String(args.x), String(args.y)]);
 }
 
 export async function desktop_type(args: {
 	text: string;
+	target_app?: string;
 }): Promise<string> {
-	console.error(`[desktop] type ${args.text.length} chars`);
+	assertFocus(args.target_app, "desktop_type");
+	console.error(`[desktop] type ${args.text.length} chars${args.target_app ? ` target=${args.target_app}` : ""}`);
 	return runDesktopAction(["type", args.text]);
 }
 
 export async function desktop_key(args: {
 	key: string;
 	modifiers?: string;
+	target_app?: string;
 }): Promise<string> {
+	assertFocus(args.target_app, "desktop_key");
 	const cmdArgs = ["key", args.key];
 	if (args.modifiers) {
 		cmdArgs.push("--modifiers", args.modifiers);
 	}
-	console.error(`[desktop] key ${args.key}${args.modifiers ? ` +${args.modifiers}` : ""}`);
+	console.error(`[desktop] key ${args.key}${args.modifiers ? ` +${args.modifiers}` : ""}${args.target_app ? ` target=${args.target_app}` : ""}`);
 	return runDesktopAction(cmdArgs);
 }
 
@@ -310,6 +356,33 @@ export async function press_element(args: {
 }): Promise<string> {
 	console.error(`[desktop] press-element in ${args.app_name}: "${args.element_description}"`);
 	return runDesktopAction(["press-element", args.app_name, args.element_description]);
+}
+
+export async function ax_type(args: {
+	app_name: string;
+	element_description: string;
+	text: string;
+}): Promise<string> {
+	console.error(`[ax-type] ${args.app_name}: "${args.element_description}" ← ${args.text.length} chars`);
+	return runDesktopAction(["ax-type", args.app_name, args.element_description, args.text]);
+}
+
+export async function get_user_activity(): Promise<string> {
+	try {
+		const out = execFileSync(findHelper("desktop-action"), ["user-activity"], {
+			encoding: "utf-8",
+			timeout: 2000,
+		}).trim();
+		const seconds = Number(out);
+		if (!Number.isFinite(seconds)) {
+			throw new Error(`unexpected output: ${out}`);
+		}
+		console.error(`[user-activity] last input ${seconds.toFixed(1)}s ago`);
+		return JSON.stringify({ seconds_since_last_input: seconds });
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		throw new Error(`user-activity helper failed: ${msg}`);
+	}
 }
 
 export async function check_accessibility_permission(): Promise<boolean> {
@@ -398,106 +471,8 @@ export async function skill_delete(args: { id: string }): Promise<string> {
 	return `Deleted skill: ${safe}`;
 }
 
-// ── Watcher classifier evaluation ───────────────────────────────────────────
-
-export interface ClassifierMatch {
-	watch_id: string;
-	description: string;
-	message_template: string;
-	detail: string;
-}
-
-export async function watch_evaluate_classifier(args: {
-	text: string;
-	source: string;
-	watches: Array<{
-		id: string;
-		description: string;
-		message_template: string;
-	}>;
-}): Promise<ClassifierMatch[]> {
-	if (!args.watches.length) return [];
-
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
-
-	const watchSpecs = args.watches
-		.map((w, i) => `  ${i + 1}. [id=${w.id}] ${w.description}`)
-		.join("\n");
-
-	const systemPrompt = `You are a trigger evaluator. Given content from ${args.source}, decide which triggers fire.
-Active triggers:
-${watchSpecs}
-
-For each trigger that matches the content, output ONE JSON object per line:
-{"id": "<watch_id>", "detail": "<brief explanation of what matched>"}
-
-If NO trigger matches, output exactly: NONE
-Be conservative — only fire when there's a clear match. Do not explain further.`;
-
-	const body = {
-		model: "gpt-4o-mini",
-		max_tokens: 300,
-		temperature: 0.0,
-		messages: [
-			{ role: "system", content: systemPrompt },
-			{ role: "user", content: args.text },
-		],
-	};
-
-	const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
-		body: JSON.stringify(body),
-		signal: AbortSignal.timeout(8_000),
-	});
-
-	if (!resp.ok) {
-		console.error(`[watch-classifier] error: ${await resp.text()}`);
-		return [];
-	}
-
-	const data = (await resp.json()) as {
-		choices?: Array<{ message?: { content?: string } }>;
-	};
-	const text =
-		data?.choices?.[0]?.message?.content?.trim() ?? "NONE";
-
-	console.error(`[watch-classifier] raw response: ${text}`);
-
-	if (text === "NONE" || !text) return [];
-
-	const watchMap = new Map(args.watches.map((w) => [w.id, w]));
-	const results: ClassifierMatch[] = [];
-
-	for (const line of text.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed === "NONE") continue;
-		try {
-			const val = JSON.parse(trimmed) as {
-				id?: string;
-				detail?: string;
-			};
-			const id = val.id;
-			const detail = val.detail;
-			const watch = id ? watchMap.get(id) : undefined;
-			if (watch && id && detail) {
-				results.push({
-					watch_id: id,
-					description: watch.description,
-					message_template: watch.message_template,
-					detail,
-				});
-			}
-		} catch {
-			continue;
-		}
-	}
-
-	console.error(`[watch-classifier] ${results.length} triggers fired`);
-	return results;
-}
+// Note: watch_evaluate_classifier lives in memory.ts. The earlier copy here
+// expected a `watches` array from the caller and silently returned [] when
+// the renderer-side hooks (which only pass {content, source}) hit it. The
+// memory.ts version fetches its own classifier watches via watch_get_classifier
+// so the contract is self-contained — that's what is now wired in index.ts.

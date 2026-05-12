@@ -6,22 +6,16 @@ import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
 import { useWatcherLoop } from "./hooks/useWatcherLoop";
-import { useAudioPlayer } from "./hooks/useAudioPlayer";
-import { useSongPlayback } from "./hooks/useSongTeaching";
 import { useUIPreferences } from "./hooks/useUIPreferences";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
 import { ScreenPicker } from "./components/ScreenPicker";
-import { WordCard } from "./components/WordCard";
 import { TeachDrop } from "./components/TeachDrop";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { LyricsViewer } from "./components/LyricsViewer";
-import { sendTextAndRespond, registerUIUpdate, registerDismissCard, registerSongPlayback, registerShowWordCard, registerSetCardMode, registerToggleLyrics, registerSetLyricsContent, registerUpdateSongLines, registerGetSongMeta, setVolume } from "./lib/session-bridge";
-import type { ContentLine } from "./lib/session-bridge";
-import type { WordCardData } from "./lib/session-bridge";
-import { registerPrivacyPrefsGetter, registerUIStateGetter } from "./lib/samuel";
+import { sendTextAndRespond, registerUIUpdate, setVolume } from "./lib/session-bridge";
+import { registerUIStateGetter } from "./lib/samuel";
 
 export default function App() {
   const {
@@ -47,9 +41,7 @@ export default function App() {
   const ui = useUIPreferences();
   const learning = useLearningMode(
     status,
-    ui.prefs["word_card.interval"] as number,
     agentState,
-    ui.prefs["word_card.mode"] as string,
     ui.prefs["privacy.screen_watch"] as boolean,
     ui.prefs["privacy.audio_listen"] as boolean,
   );
@@ -69,38 +61,15 @@ export default function App() {
     setVolume(samuelVolume ?? 80);
   }, [samuelVolume]);
 
-  const [songAudioPath, setSongAudioPath] = useState<string | null>(null);
-  const [songLines, setSongLines] = useState<ContentLine[] | null>(null);
-  const [songTitle, setSongTitle] = useState<string | null>(null);
-  const [songSource, setSongSource] = useState<string | null>(null);
-  const [songVideoId, setSongVideoId] = useState<string | null>(null);
-
-  const audioPlayer = useAudioPlayer(songAudioPath);
-  const songPlayback = useSongPlayback({
-    lines: songLines,
-    player: audioPlayer,
-  });
-
   const [awaitingWake, setAwaitingWake] = useState(true);
   const [envelopeOpen, setEnvelopeOpen] = useState(false);
-  const [wordCard, setWordCard] = useState<WordCardData | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [lyricsViewOpen, setLyricsViewOpen] = useState(false);
 
   const handlePrivacyToggle = useCallback((key: "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location") => {
     const current = ui.prefs[key];
     const prop = key.split(".")[1];
     ui.applyUpdate({ component: "privacy", property: prop, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
-
-  // Expose privacy prefs to Samuel's tools so they can check at call time
-  useEffect(() => {
-    registerPrivacyPrefsGetter(() => ({
-      local_time_enabled: ui.prefs["privacy.local_time"] as boolean,
-      location_enabled: ui.prefs["privacy.location"] as boolean,
-    }));
-    return () => registerPrivacyPrefsGetter(null);
-  }, [ui.prefs["privacy.local_time"], ui.prefs["privacy.location"]]);
 
   // Expose full UI state so query_ui_state tool can read current values
   useEffect(() => {
@@ -115,80 +84,6 @@ export default function App() {
     );
     return () => registerUIUpdate(null);
   }, [ui.applyUpdate]);
-
-  // Register dismiss-card bridge so Samuel can close word cards by voice
-  useEffect(() => {
-    registerDismissCard(() => setWordCard(null));
-    return () => registerDismissCard(null);
-  }, []);
-
-  // Register show-word-card bridge so Samuel can display word cards on demand
-  useEffect(() => {
-    registerShowWordCard((card) => setWordCard(card));
-    return () => registerShowWordCard(null);
-  }, []);
-
-  // Register card-mode bridge so Samuel can toggle manual / auto by voice
-  useEffect(() => {
-    registerSetCardMode((mode, intervalSec) => {
-      ui.applyUpdate({ component: "word_card", property: "mode", value: mode });
-      if (intervalSec !== undefined) {
-        ui.applyUpdate({ component: "word_card", property: "frequency", value: String(intervalSec) });
-      }
-    });
-    return () => registerSetCardMode(null);
-  }, [ui.applyUpdate]);
-
-  // Register lyrics viewer bridges — toggle visibility + push content from web search
-  useEffect(() => {
-    registerToggleLyrics((visible) => setLyricsViewOpen(visible));
-    registerSetLyricsContent((title, lines) => {
-      setSongTitle(title);
-      setSongLines(lines.map((text, i) => ({ text, timestamp: null, source_index: i })));
-      setLyricsViewOpen(true);
-    });
-    return () => {
-      registerToggleLyrics(null);
-      registerSetLyricsContent(null);
-    };
-  }, []);
-
-  // Register song lines hot-swap + metadata bridges for lyrics correction tools
-  useEffect(() => {
-    registerUpdateSongLines((lines) => {
-      setSongLines(lines);
-    });
-    registerGetSongMeta(() => ({
-      title: songTitle,
-      source: songSource,
-      videoId: songVideoId,
-      lines: songLines ?? [],
-    }));
-    return () => {
-      registerUpdateSongLines(null);
-      registerGetSongMeta(null);
-    };
-  }, [songTitle, songSource, songVideoId]);
-
-  // Register song playback bridge — mute mic during playback, unmute when done.
-  // Returns a promise so Samuel's tool waits until the segment finishes before speaking.
-  useEffect(() => {
-    registerSongPlayback(
-      (from, to) =>
-        new Promise<void>((resolve) => {
-          mute(true);
-          songPlayback.playLines(from, to, () => {
-            mute(false);
-            resolve();
-          });
-        }),
-      () => {
-        songPlayback.pause();
-        mute(false);
-      },
-    );
-    return () => registerSongPlayback(null, null);
-  }, [songPlayback.playLines, songPlayback.pause, mute]);
 
   // Keep the session alive during recording and while viewing results
   useEffect(() => {
@@ -228,7 +123,9 @@ export default function App() {
       .slice(-20)
       .map((t) => `${t.role}: ${t.text}`)
       .join("\n");
-    if (entries.length > 50) {
+    // Threshold dropped from 50 → 8 chars: even a single "no, not like that"
+    // pushback is worth a Reflexion pass. Empty/silent sessions still skip.
+    if (entries.length > 8) {
       invoke("extract_session_feedback", { transcript: entries }).catch(() => {});
     }
   }, [transcript]);
@@ -265,12 +162,10 @@ export default function App() {
     disconnect();
   }, [disconnect, setWakeWordMode, extractFeedback]);
 
-  // Auto-resize window; respect user-set width/height prefs; widen for lyrics
-  const lyricsActive = lyricsViewOpen && !!songLines;
+  // Auto-resize window; respect user-set width/height prefs
   const containerRef = useRef<HTMLDivElement>(null);
   const userW = (ui.prefs["window.width"] as number) ?? 520;
   const userH = (ui.prefs["window.height"] as number) ?? 740;
-  const lyricsWidth = (ui.prefs["lyrics.width"] as number) ?? 185;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -279,23 +174,20 @@ export default function App() {
     const MIN_H = 400;
     const MAX_H = Math.max(userH, 900);
     let lastH = 0;
-    // When lyrics are open, ensure window is wide enough for lyrics + avatar
-    const minForLyrics = lyricsWidth + 350;
-    const targetW = lyricsActive ? Math.max(userW, minForLyrics) : userW;
     const observer = new ResizeObserver(() => {
       const needed = Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20));
       if (Math.abs(needed - lastH) > 10) {
         lastH = needed;
-        win.setSize(new LogicalSize(targetW, needed));
+        win.setSize(new LogicalSize(userW, needed));
       }
     });
     observer.observe(el);
-    win.setSize(new LogicalSize(targetW, Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20))));
+    win.setSize(new LogicalSize(userW, Math.min(MAX_H, Math.max(MIN_H, el.scrollHeight + 20))));
     return () => observer.disconnect();
-  }, [lyricsActive, userW, userH, lyricsWidth]);
+  }, [userW, userH]);
 
   return (
-    <div ref={containerRef} className={`flex h-screen flex-col ${lyricsActive ? "lyrics-active" : ""}`} style={ui.cssVars as React.CSSProperties}>
+    <div ref={containerRef} className="flex h-screen flex-col" style={ui.cssVars as React.CSSProperties}>
       {/* Compact header — draggable region for borderless window */}
       <div className="drag-region flex items-center justify-between px-5 py-2">
         <StatusBar
@@ -400,21 +292,6 @@ export default function App() {
         onDenyToolCall={denyToolCall}
         onAlwaysAllowApp={alwaysAllowApp}
         onAlwaysDenyApp={alwaysDenyApp}
-      />
-
-      {/* Tool-driven word card — only shown when Samuel decides to */}
-      <WordCard card={wordCard} onDismiss={() => setWordCard(null)} />
-
-      {/* Lyrics viewer — shown by Samuel's toggle_lyrics tool */}
-      <LyricsViewer
-        visible={lyricsViewOpen && !!songLines}
-        lines={songLines ?? []}
-        title={songTitle ?? undefined}
-        onClose={() => setLyricsViewOpen(false)}
-        onLineClick={(lineNum) => {
-          mute(true);
-          songPlayback.playLines(lineNum, lineNum, () => mute(false));
-        }}
       />
 
       <PluginApproval />

@@ -54,31 +54,6 @@ const SCHEMA: Record<string, PropSchema> = {
     aliases: ["speech_bubble.max_width", "speech_bubble.width", "bubble.width"],
   },
 
-  // ── Word/vocab card ──
-  "word_card.visible": {
-    type: "boolean", default: true,
-    aliases: ["vocab_card.visible", "card.visible"],
-  },
-  "word_card.position": {
-    type: "enum", default: "right", options: ["left", "right"],
-    aliases: ["vocab_card.position", "card.position"],
-  },
-  "word_card.mode": {
-    type: "enum", default: "manual", options: ["manual", "auto"],
-    aliases: ["vocab_card.mode", "card.mode"],
-  },
-  "word_card.interval": {
-    type: "number", default: 45, min: 10, max: 600, step: 30, unit: "s",
-    aliases: ["vocab_card.interval", "vocab_card.frequency", "card.frequency",
-              "card.interval", "word_card.frequency"],
-  },
-  "word_card.font_size": {
-    type: "number", default: 13, min: 10, max: 24, step: 2, unit: "px",
-    cssVar: "--word-card-font-size",
-    aliases: ["vocab_card.font_size", "vocab_card.size", "card.font_size", "card.size",
-              "word_card.size"],
-  },
-
   // ── Annotations ──
   "romaji.visible": {
     type: "boolean", default: true,
@@ -100,33 +75,6 @@ const SCHEMA: Record<string, PropSchema> = {
     type: "number", default: 0.95, min: 0.3, max: 1, step: 0.1, unit: "",
     cssVar: "--teach-opacity",
     aliases: ["teach_viewer.opacity"],
-  },
-
-  // ── Lyrics HUD panel ──
-  "lyrics.width": {
-    type: "number", default: 185, min: 120, max: 500, step: 40, unit: "px",
-    cssVar: "--lyrics-width",
-    aliases: ["lyrics_panel.width"],
-  },
-  "lyrics.font_size": {
-    type: "number", default: 12, min: 9, max: 22, step: 2, unit: "px",
-    cssVar: "--lyrics-font-size",
-    aliases: ["lyrics_panel.font_size", "lyrics_panel.size", "lyrics.size"],
-  },
-  "lyrics.opacity": {
-    type: "number", default: 0.55, min: 0.2, max: 1, step: 0.1, unit: "",
-    cssVar: "--lyrics-opacity",
-    aliases: ["lyrics_panel.opacity"],
-  },
-  "lyrics.left": {
-    type: "number", default: 8, min: 0, max: 800, step: 20, unit: "px",
-    cssVar: "--lyrics-left",
-    aliases: ["lyrics_panel.left", "lyrics.position", "lyrics_panel.position", "lyrics.x"],
-  },
-  "lyrics.top": {
-    type: "number", default: 40, min: 0, max: 600, step: 20, unit: "px",
-    cssVar: "--lyrics-top",
-    aliases: ["lyrics_panel.top", "lyrics.y"],
   },
 
   // ── Transcript / chat area ──
@@ -230,14 +178,9 @@ function migratePrefs(saved: Record<string, unknown>): UIPreferences {
     samuel_size: "avatar.size",
     samuel_opacity: "avatar.opacity",
     bubble_font_size: "bubble.font_size",
-    vocab_card_visible: "word_card.visible",
-    vocab_card_position: "word_card.position",
-    vocab_card_interval: "word_card.interval",
-    vocab_card_mode: "word_card.mode",
     romaji_visible: "romaji.visible",
     reading_visible: "reading.visible",
     teach_font_size: "teach.font_size",
-    lyrics_width: "lyrics.width",
     screen_watch_enabled: "privacy.screen_watch",
     audio_listen_enabled: "privacy.audio_listen",
     local_time_enabled: "privacy.local_time",
@@ -335,8 +278,6 @@ const ACCENT_HUES: Record<string, string> = {
 };
 
 // ── Exported types ──
-export type VocabCardMode = "manual" | "auto";
-
 export type UIUpdatePayload = {
   component: string;
   property: string;
@@ -441,11 +382,6 @@ export function useUIPreferences(): UseUIPreferencesReturn {
         : "";
       vars[schema.cssVar] = `${val}${suffix}`;
     }
-
-    // Derived vars that depend on computed values
-    const cardPos = prefs["word_card.position"] ?? "right";
-    vars["--vocab-card-side"] = cardPos === "left" ? "auto" : "20px";
-    vars["--vocab-card-side-left"] = cardPos === "left" ? "20px" : "auto";
 
     return vars;
   }, [prefs]);

@@ -30,6 +30,14 @@ export interface WatchEntry {
 	total_minutes: number;
 }
 
+// Delivery cadence for a watch.
+//   "every"  — fire on each match, gated only by cooldown_secs (default).
+//   "once"   — fire on the first match then auto-disable; ignores cooldown.
+//   "digest" — accumulate match details into digest_buffer; deliver one
+//              summary per digest_window_secs window (or whenever the
+//              watcher loop next flushes after the window elapses).
+export type WatchMode = "every" | "once" | "digest";
+
 export interface WatchAlert {
 	id: string;
 	description: string;
@@ -42,6 +50,29 @@ export interface WatchAlert {
 	cooldown_secs: number;
 	last_fired_at: number;
 	enabled: boolean;
+	// Frequency knobs — all optional so previously-saved watches still load.
+	mode?: WatchMode;
+	digest_window_secs?: number;
+	digest_buffer?: string[];
+	digest_started_at?: number;
+	// Debounce — if > 0, the match must hold for at least this many seconds
+	// (i.e. across multiple consecutive watcher ticks) before the trigger
+	// fires. pending_since is runtime state — the timestamp of the first
+	// uninterrupted match in the current run; reset to 0 when a tick goes by
+	// without a match.
+	debounce_secs?: number;
+	pending_since?: number;
+	// Per-watch suppression list. Case-insensitive substrings — if any one of
+	// them appears in a candidate fire's detail string, that fire is skipped.
+	// Populated by the user via watch_for(action="suppress"): "don't remind
+	// me about <term> again".
+	suppress_terms?: string[];
+	// Optional expiry. If set and now > expires_at, the watch is auto-removed
+	// on the next memory load or cleanup sweep. 0/undefined = never expire.
+	expires_at?: number;
+	// Tracked for stale-watch cleanup. Updated whenever the trigger condition
+	// matches (even if the fire is suppressed/buffered/debounced).
+	last_match_at?: number;
 }
 
 export interface WatchCheckMatch {
@@ -97,7 +128,18 @@ function loadMemory(): SamuelMemory {
 		if (!existsSync(path)) return defaultMemory();
 		const data = readFileSync(path, "utf-8");
 		const parsed = JSON.parse(data) as Partial<SamuelMemory>;
-		return { ...defaultMemory(), ...parsed };
+		const merged = { ...defaultMemory(), ...parsed };
+		// Sweep watches whose explicit expires_at has elapsed. Stale-by-age
+		// cleanup is handled by the explicit watch_cleanup_stale call so it
+		// can surface what got removed; load-time sweep is just for the
+		// hard time-bomb case ("remind me before 3pm today").
+		if (Array.isArray(merged.active_watches)) {
+			const now = Math.floor(Date.now() / 1000);
+			merged.active_watches = merged.active_watches.filter(
+				(w) => !(w.expires_at && w.expires_at > 0 && now > w.expires_at),
+			);
+		}
+		return merged;
 	} catch {
 		return defaultMemory();
 	}
@@ -228,7 +270,14 @@ export function get_watches_context(): string | null {
 			w.condition_type === "keyword"
 				? `keywords: ${w.keywords.join(", ")}`
 				: "classifier (LLM judgment)";
-		return `- [${w.id}] ${w.description} (${cond}, source: ${w.source}, cooldown: ${w.cooldown_secs}s, fired: ${w.fire_count}x)`;
+		const mode = watchMode(w);
+		const cadence =
+			mode === "digest"
+				? `digest every ${w.digest_window_secs ?? 60}s`
+				: mode === "once"
+					? "once"
+					: `every (cooldown ${w.cooldown_secs}s)`;
+		return `- [${w.id}] ${w.description} (${cond}, source: ${w.source}, ${cadence}, fired: ${w.fire_count}x)`;
 	});
 	return `Active watches:\n${lines.join("\n")}`;
 }
@@ -242,6 +291,10 @@ function addWatchInternal(
 	source: string,
 	messageTemplate: string,
 	cooldownSecs: number,
+	mode: WatchMode = "every",
+	digestWindowSecs = 0,
+	debounceSecs = 0,
+	expiresAt = 0,
 ): string {
 	const id = `w_${nowSecs()}`;
 	withMemory((mem) => {
@@ -257,12 +310,124 @@ function addWatchInternal(
 			cooldown_secs: cooldownSecs,
 			last_fired_at: 0,
 			enabled: true,
+			mode,
+			digest_window_secs: digestWindowSecs,
+			digest_buffer: [],
+			digest_started_at: 0,
+			debounce_secs: debounceSecs,
+			pending_since: 0,
+			suppress_terms: [],
+			expires_at: expiresAt,
+			last_match_at: 0,
 		});
 		if (mem.active_watches.length > MAX_WATCHES) {
 			mem.active_watches.shift();
 		}
 	});
 	return id;
+}
+
+function watchMode(w: WatchAlert): WatchMode {
+	const m = w.mode ?? "every";
+	return m === "once" || m === "digest" ? m : "every";
+}
+
+// Apply the mode-aware delivery rules to a freshly-detected match.
+//   "fire"       → caller emits a trigger now.
+//   "buffered"   → digest mode swallowed it; flushDigests will deliver later.
+//   "suppressed" → once-mode trigger already spent, debounce window not yet
+//                  reached, or detail contains a user-suppressed term.
+type WatchOutcome =
+	| { kind: "fire"; detail: string }
+	| { kind: "buffered" }
+	| { kind: "suppressed" };
+
+// Case-insensitive substring check against the watch's user-curated
+// suppress list. Empty/missing list → never suppresses.
+function detailIsSuppressed(watch: WatchAlert, detail: string): boolean {
+	const terms = watch.suppress_terms;
+	if (!terms || terms.length === 0) return false;
+	const lower = detail.toLowerCase();
+	return terms.some((t) => t && lower.includes(t.toLowerCase()));
+}
+
+function applyWatchOutcome(watch: WatchAlert, detail: string): WatchOutcome {
+	const now = nowSecs();
+	// Track the most recent raw match regardless of fire decision; used by
+	// the stale-cleanup sweep to distinguish "registered but never seen the
+	// condition" from "still relevant, just not delivering right now".
+	watch.last_match_at = now;
+
+	// User has previously said "don't remind me about <term>". Skip silently.
+	if (detailIsSuppressed(watch, detail)) {
+		return { kind: "suppressed" };
+	}
+
+	const mode = watchMode(watch);
+
+	if (mode === "once" && watch.fire_count > 0) {
+		return { kind: "suppressed" };
+	}
+
+	// Debounce — require the condition to remain matching for at least
+	// debounce_secs continuous seconds before firing. State machine:
+	//   pending_since = 0 → first sighting; record it, suppress.
+	//   pending_since > 0 && now - pending_since < debounce_secs → still
+	//     ramping up, suppress.
+	//   pending_since > 0 && elapsed >= debounce_secs → confirmed, fall
+	//     through to mode-specific firing and reset pending_since.
+	// pending_since is reset to 0 by `resetPendingForUnmatched` when a tick
+	// goes by without a match for this watch (see classifier/keyword paths).
+	const debounce = watch.debounce_secs ?? 0;
+	if (debounce > 0 && mode !== "digest") {
+		if (!watch.pending_since || watch.pending_since === 0) {
+			watch.pending_since = now;
+			return { kind: "suppressed" };
+		}
+		if (now - watch.pending_since < debounce) {
+			return { kind: "suppressed" };
+		}
+		// Confirmed match → fall through to fire, clear pending state.
+		watch.pending_since = 0;
+	}
+
+	if (mode === "digest") {
+		if (!watch.digest_buffer) watch.digest_buffer = [];
+		watch.digest_buffer.push(detail);
+		if (!watch.digest_started_at || watch.digest_started_at === 0) {
+			watch.digest_started_at = now;
+		}
+		return { kind: "buffered" };
+	}
+
+	// "every" or first-match "once": fire immediately.
+	watch.fire_count += 1;
+	watch.last_fired_at = now;
+	if (mode === "once") watch.enabled = false; // self-disable after spending
+	return { kind: "fire", detail };
+}
+
+// Called by the renderer's watcher loops with the set of watch ids that
+// matched this tick. Watches that did NOT match must have their pending
+// debounce window reset, otherwise a flickering condition would fire after
+// any 2 matches separated by an arbitrary gap. One-shot per source, called
+// once per tick after the matched-set is finalized.
+export async function watch_reset_unmatched(args: {
+	source: string;
+	matched_ids: string[];
+}): Promise<void> {
+	const matched = new Set(args.matched_ids);
+	withMemory((mem) => {
+		for (const watch of mem.active_watches) {
+			if (!watch.enabled) continue;
+			if (watch.source !== "both" && watch.source !== args.source) continue;
+			if ((watch.debounce_secs ?? 0) === 0) continue;
+			if (matched.has(watch.id)) continue;
+			if (watch.pending_since && watch.pending_since !== 0) {
+				watch.pending_since = 0;
+			}
+		}
+	});
 }
 
 function removeWatchInternal(id: string): boolean {
@@ -292,12 +457,17 @@ function checkWatchesKeyword(text: string, source: string): Array<[string, strin
 			if (!watch.enabled) continue;
 			if (watch.source !== "both" && watch.source !== source) continue;
 			if (watch.condition_type !== "keyword" || watch.keywords.length === 0) continue;
-			if (watch.last_fired_at > 0 && now - watch.last_fired_at < watch.cooldown_secs) continue;
+			// Cooldown gates "every"-mode firing only. "digest" paces itself via
+			// the digest window; "once" self-disables after the first fire.
+			const mode = watchMode(watch);
+			if (mode === "every" && watch.last_fired_at > 0 && now - watch.last_fired_at < watch.cooldown_secs) continue;
 
-			const hit = watch.keywords.some((kw) => lower.includes(kw));
-			if (hit) {
-				watch.fire_count += 1;
-				watch.last_fired_at = now;
+			const matchedKw = watch.keywords.find((kw) => lower.includes(kw));
+			if (!matchedKw) continue;
+
+			const detail = `keyword "${matchedKw}" matched`;
+			const outcome = applyWatchOutcome(watch, detail);
+			if (outcome.kind === "fire") {
 				matches.push([watch.id, watch.description, watch.message_template]);
 			}
 		}
@@ -308,13 +478,17 @@ function checkWatchesKeyword(text: string, source: string): Array<[string, strin
 function getClassifierWatchesInternal(source: string): WatchAlert[] {
 	const now = nowSecs();
 	return withMemory((mem) =>
-		mem.active_watches.filter(
-			(w) =>
-				w.enabled &&
-				w.condition_type === "classifier" &&
-				(w.source === "both" || w.source === source) &&
-				(w.last_fired_at === 0 || now - w.last_fired_at >= w.cooldown_secs),
-		),
+		mem.active_watches.filter((w) => {
+			if (!w.enabled) return false;
+			if (w.condition_type !== "classifier") return false;
+			if (w.source !== "both" && w.source !== source) return false;
+			// Cooldown only applies to "every"-mode triggers. Digest watches
+			// must keep collecting between flushes (cooldown would silently
+			// drop matches in the gap), and once-mode watches self-disable
+			// after firing so this branch is unreachable for them anyway.
+			if (watchMode(w) !== "every") return true;
+			return w.last_fired_at === 0 || now - w.last_fired_at >= w.cooldown_secs;
+		}),
 	);
 }
 
@@ -345,7 +519,7 @@ function markKnownInternal(words: string[]): void {
 	});
 }
 
-// ── Exported Tauri command handlers ──────────────────────────────────────────
+// ── Exported memory command handlers ─────────────────────────────────────────
 
 export async function memory_clear(): Promise<void> {
 	const path = memoryPath();
@@ -451,7 +625,19 @@ export async function watch_add(args: {
 	source: string;
 	message_template: string;
 	cooldown_secs: number;
+	mode?: WatchMode;
+	digest_window_secs?: number;
+	debounce_secs?: number;
+	expires_in_secs?: number;
 }): Promise<string> {
+	const mode: WatchMode = args.mode === "once" || args.mode === "digest" ? args.mode : "every";
+	// Digest needs a positive window; if caller forgot, default to 60s so it
+	// still bunches a few matches instead of flushing on the next tick.
+	const digestWindow = mode === "digest" ? Math.max(args.digest_window_secs ?? 60, 1) : 0;
+	const debounce = Math.max(args.debounce_secs ?? 0, 0);
+	const expiresAt = args.expires_in_secs && args.expires_in_secs > 0
+		? nowSecs() + args.expires_in_secs
+		: 0;
 	const id = addWatchInternal(
 		args.description,
 		args.condition_type,
@@ -459,11 +645,117 @@ export async function watch_add(args: {
 		args.source,
 		args.message_template,
 		args.cooldown_secs,
+		mode,
+		digestWindow,
+		debounce,
+		expiresAt,
 	);
-	console.error(
-		`[watch] added trigger: ${id} — ${args.description} (type=${args.condition_type}, cooldown=${args.cooldown_secs}s)`,
-	);
+	const meta = [
+		`type=${args.condition_type}`,
+		`mode=${mode}`,
+		mode === "digest" ? `window=${digestWindow}s` : null,
+		`cooldown=${args.cooldown_secs}s`,
+		debounce > 0 ? `debounce=${debounce}s` : null,
+		expiresAt > 0 ? `expires=${expiresAt}` : null,
+	].filter(Boolean).join(", ");
+	console.error(`[watch] added trigger: ${id} — ${args.description} (${meta})`);
 	return id;
+}
+
+// Mutate fields on an existing watch without re-creating it. Used by voice
+// requests like "make that less frequent" or "stop the build watcher" — the
+// model picks fields to override and the runtime applies them in-place.
+export async function watch_update(args: {
+	id: string;
+	enabled?: boolean;
+	cooldown_secs?: number;
+	mode?: WatchMode;
+	digest_window_secs?: number;
+	debounce_secs?: number;
+	expires_in_secs?: number;
+	description?: string;
+}): Promise<boolean> {
+	return withMemory((mem) => {
+		const w = mem.active_watches.find((w) => w.id === args.id);
+		if (!w) return false;
+		if (args.enabled !== undefined) w.enabled = args.enabled;
+		if (args.cooldown_secs !== undefined) w.cooldown_secs = Math.max(args.cooldown_secs, 0);
+		if (args.mode === "every" || args.mode === "once" || args.mode === "digest") {
+			w.mode = args.mode;
+			// Switching modes invalidates pending state from the old mode.
+			w.pending_since = 0;
+			w.digest_buffer = [];
+			w.digest_started_at = 0;
+		}
+		if (args.digest_window_secs !== undefined && watchMode(w) === "digest") {
+			w.digest_window_secs = Math.max(args.digest_window_secs, 1);
+		}
+		if (args.debounce_secs !== undefined) {
+			w.debounce_secs = Math.max(args.debounce_secs, 0);
+			w.pending_since = 0; // fresh debounce window
+		}
+		if (args.expires_in_secs !== undefined) {
+			w.expires_at = args.expires_in_secs > 0 ? nowSecs() + args.expires_in_secs : 0;
+		}
+		if (args.description) w.description = args.description;
+		console.error(`[watch] updated ${args.id}: ${JSON.stringify(args)}`);
+		return true;
+	});
+}
+
+// Append a "don't remind me about <term>" suppression to a watch. Future
+// candidate fires whose detail contains this term (case-insensitive) are
+// silently dropped. Survives across sessions because it's persisted in the
+// watch object itself.
+export async function watch_suppress_term(args: {
+	id: string;
+	term: string;
+}): Promise<boolean> {
+	const term = (args.term ?? "").trim();
+	if (!term) return false;
+	return withMemory((mem) => {
+		const w = mem.active_watches.find((w) => w.id === args.id);
+		if (!w) return false;
+		if (!w.suppress_terms) w.suppress_terms = [];
+		const existing = new Set(w.suppress_terms.map((t) => t.toLowerCase()));
+		if (!existing.has(term.toLowerCase())) {
+			w.suppress_terms.push(term);
+		}
+		console.error(`[watch] suppressed term on ${args.id}: "${term}" (now ${w.suppress_terms.length})`);
+		return true;
+	});
+}
+
+// Sweep stale + expired watches.
+//   expired:  expires_at > 0 && now > expires_at  → always remove
+//   stale:    older than max_age_secs AND last_match_at == 0  → remove
+//             (registered but never saw the condition fire even once)
+// Returns the ids that were removed so callers can summarize for the user.
+export async function watch_cleanup_stale(args?: {
+	max_age_secs?: number;
+}): Promise<string[]> {
+	const maxAge = args?.max_age_secs ?? 30 * 24 * 60 * 60; // 30 days
+	const now = nowSecs();
+	return withMemory((mem) => {
+		const removed: string[] = [];
+		mem.active_watches = mem.active_watches.filter((w) => {
+			if (w.expires_at && w.expires_at > 0 && now > w.expires_at) {
+				removed.push(w.id);
+				return false;
+			}
+			const age = now - (w.created_at || now);
+			const everMatched = (w.last_match_at ?? 0) > 0 || w.fire_count > 0;
+			if (age > maxAge && !everMatched) {
+				removed.push(w.id);
+				return false;
+			}
+			return true;
+		});
+		if (removed.length > 0) {
+			console.error(`[watch] cleanup removed ${removed.length} stale: ${removed.join(",")}`);
+		}
+		return removed;
+	});
 }
 
 export async function watch_remove(args: { id: string }): Promise<boolean> {
@@ -514,13 +806,34 @@ export async function watch_evaluate_classifier(args: {
 		.map((w, i) => `  ${i + 1}. [id=${w.id}] ${w.description}`)
 		.join("\n");
 
+	// Fewshot examples cover the common ambiguity classes the user runs into:
+	// language-vocab triggers, quality/sentiment triggers, presence-of-thing
+	// triggers, and the "NONE" baseline. Detail strings stay short (≤80 chars)
+	// because they end up in user-facing alerts and the digest buffer.
 	const systemPrompt =
-		`You are a trigger evaluator. Given content from ${args.source}, decide which triggers fire.\n` +
+		`You are a trigger evaluator. Given content from ${args.source}, decide which registered triggers fire on this content.\n` +
 		`Active triggers:\n${watchSpecs}\n\n` +
-		`For each trigger that matches the content, output ONE JSON object per line:\n` +
-		`{"id": "<watch_id>", "detail": "<brief explanation of what matched>"}\n\n` +
-		`If NO trigger matches, output exactly: NONE\n` +
-		`Be conservative — only fire when there's a clear match. Do not explain further.`;
+		`For each trigger that matches, output ONE JSON object per line:\n` +
+		`{"id": "<watch_id>", "detail": "<≤80 chars, the specific evidence in the content>"}\n` +
+		`If NOTHING matches, output exactly: NONE\n\n` +
+		`Rules:\n` +
+		`- Be conservative — fire only on clear, specific evidence in the content. Don't infer from absence.\n` +
+		`- "detail" must quote or name the actual thing that matched (a word, phrase, person, sentiment cue), not a paraphrase.\n` +
+		`- Multiple triggers can fire on the same content; emit one JSON line per trigger.\n` +
+		`- Do not explain. Do not add prose. Output JSON lines or NONE.\n\n` +
+		`Examples:\n` +
+		`Triggers: 1. [id=w_ex1] N2-level Japanese vocabulary  2. [id=w_ex2] mention of project deadlines\n` +
+		`Content: "今日は会議で締め切りについて話しました" (Today we talked about the deadline in the meeting)\n` +
+		`Output:\n` +
+		`{"id":"w_ex1","detail":"締め切り (shimekiri, deadline) — N2"}\n` +
+		`{"id":"w_ex2","detail":"deadline mentioned in meeting"}\n\n` +
+		`Triggers: 1. [id=w_ex3] speaker sounds frustrated or angry\n` +
+		`Content: "the build broke again, this is the third time today"\n` +
+		`Output:\n` +
+		`{"id":"w_ex3","detail":"third build break today, exasperated tone"}\n\n` +
+		`Triggers: 1. [id=w_ex4] someone mentions Tokyo\n` +
+		`Content: "I had ramen for lunch and read the news"\n` +
+		`Output: NONE`;
 
 	const body = {
 		model: "gpt-4o-mini",
@@ -554,8 +867,8 @@ export async function watch_evaluate_classifier(args: {
 
 	if (text === "NONE" || text === "") return [];
 
-	const watchMap = new Map(watches.map((w) => [w.id, w]));
-	const results: ClassifierMatch[] = [];
+	const watchIds = new Set(watches.map((w) => w.id));
+	const llmHits: Array<{ id: string; detail: string }> = [];
 
 	for (const line of text.split("\n")) {
 		const trimmed = line.trim();
@@ -564,23 +877,78 @@ export async function watch_evaluate_classifier(args: {
 			const val = JSON.parse(trimmed);
 			const id = val.id as string;
 			const detail = val.detail as string;
-			if (id && detail) {
-				const watch = watchMap.get(id);
-				if (watch) {
-					markWatchFiredInternal(id);
-					results.push({
-						watch_id: id,
-						description: watch.description,
-						message_template: watch.message_template,
-						detail,
-					});
-				}
+			if (id && detail && watchIds.has(id)) {
+				llmHits.push({ id, detail });
 			}
 		} catch {
 			// skip unparseable lines
 		}
 	}
 
-	console.error(`[watch-classifier] ${results.length} triggers fired`);
+	// Funnel through the unified mode gate so "once"/"digest" semantics apply
+	// to classifier hits the same way they do to keyword hits.
+	const results: ClassifierMatch[] = [];
+	withMemory((mem) => {
+		for (const { id, detail } of llmHits) {
+			const watch = mem.active_watches.find((w) => w.id === id);
+			if (!watch || !watch.enabled) continue;
+			const outcome = applyWatchOutcome(watch, detail);
+			if (outcome.kind === "fire") {
+				results.push({
+					watch_id: id,
+					description: watch.description,
+					message_template: watch.message_template,
+					detail: outcome.detail,
+				});
+			}
+		}
+	});
+
+	console.error(
+		`[watch-classifier] llm=${llmHits.length} fired=${results.length} buffered/suppressed=${llmHits.length - results.length}`,
+	);
 	return results;
+}
+
+// Drain digest buffers whose collection window has elapsed. Called by the
+// renderer's watcher loops every tick after the keyword/classifier checks.
+// One delivered digest per watch per call.
+export async function watch_flush_digests(args: { source: string }): Promise<ClassifierMatch[]> {
+	const now = nowSecs();
+	return withMemory((mem) => {
+		const out: ClassifierMatch[] = [];
+		for (const watch of mem.active_watches) {
+			if (!watch.enabled) continue;
+			if (watchMode(watch) !== "digest") continue;
+			if (watch.source !== "both" && watch.source !== args.source) continue;
+
+			const buffer = watch.digest_buffer ?? [];
+			if (buffer.length === 0) continue;
+
+			const startedAt = watch.digest_started_at ?? 0;
+			const window = watch.digest_window_secs ?? 0;
+			// Window not yet elapsed → keep collecting.
+			if (window > 0 && startedAt > 0 && now - startedAt < window) continue;
+
+			// Drain — one summary line, capped at 8 details to keep the prompt small.
+			const head = buffer.slice(0, 8);
+			const detail =
+				buffer.length === 1
+					? head[0]
+					: `${buffer.length} matches over ${Math.max(1, now - startedAt)}s: ${head.join("; ")}${buffer.length > 8 ? "; …" : ""}`;
+
+			watch.digest_buffer = [];
+			watch.digest_started_at = 0;
+			watch.fire_count += 1;
+			watch.last_fired_at = now;
+
+			out.push({
+				watch_id: watch.id,
+				description: watch.description,
+				message_template: watch.message_template,
+				detail,
+			});
+		}
+		return out;
+	});
 }

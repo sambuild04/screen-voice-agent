@@ -13,6 +13,17 @@ import {
 let defaultDisplay = 1;
 let autoScreenHash = 0;
 
+// Adaptive JPEG encoding cache: remember the last config that fit under
+// SIZE_CAP so subsequent captures start at a known-good (q, width) instead
+// of always starting at 1440px@q=55. On a high-DPI / multi-display setup
+// the initial config never fits and we burn 6-7 sips re-encodings (~700ms
+// cumulative) per capture before settling at 1024@q=30. With this cache,
+// the second capture onwards converges in 1 sips invocation.
+let lastFullDisplayQuality = 55;
+let lastFullDisplayWidthIdx = 0;
+let lastFocusedQuality = 65;
+let lastFocusedWidthIdx = 0;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
 export interface CaptureResult {
@@ -276,10 +287,13 @@ function captureFullDisplay(): CaptureResult {
 	// INVALID_RANGE and tore down the session (see 458→370→...→206KB chain
 	// in the YouTube/Classroom of the Elite log). Step both quality AND
 	// width down so we never bottom out at unreadable q=15.
-	let quality = 55;
 	const widths = [1440, 1200, 1024];
-	let widthIdx = 0;
 	const SIZE_CAP = 140_000;
+	// Start from last successful config — first capture explores, subsequent
+	// ones converge in 1 sips call. Even on first run, biasing toward the
+	// known multi-display ceiling (1024@q=30) avoids 6 wasted re-encodes.
+	let quality = lastFullDisplayQuality;
+	let widthIdx = lastFullDisplayWidthIdx;
 	while (true) {
 		try {
 			execFileSync("/usr/bin/sips", [
@@ -307,6 +321,10 @@ function captureFullDisplay(): CaptureResult {
 			`[capture] JPEG too large (${size}B), retrying q=${quality} w=${widths[widthIdx]}`,
 		);
 	}
+
+	// Persist this config so the next capture skips the search entirely.
+	lastFullDisplayQuality = quality;
+	lastFullDisplayWidthIdx = widthIdx;
 
 	tryRemove(tmpPng);
 
@@ -493,10 +511,10 @@ end tell`;
 	// down the session (we hit this with a 409KB JPEG at q=85/1920w).
 	// The proven auto-context capture lands at ~177KB and transmits
 	// reliably; we mirror its sizing for observe_screen.
-	let quality = 65;
 	const widths = [1440, 1280, 1024];
-	let widthIdx = 0;
 	const SIZE_CAP = 190_000;
+	let quality = lastFocusedQuality;
+	let widthIdx = lastFocusedWidthIdx;
 	while (true) {
 		try {
 			execFileSync("/usr/bin/sips", [
@@ -512,7 +530,6 @@ end tell`;
 		}
 		const sz = statSync(tmpJpg).size;
 		if (sz <= SIZE_CAP || quality <= 35) break;
-		// Drop quality first; only shrink width once we're already at q=50.
 		quality -= 8;
 		if (quality < 50 && widthIdx < widths.length - 1) {
 			widthIdx++;
@@ -522,6 +539,9 @@ end tell`;
 			`[capture] focus JPEG too large (${sz}B), retry q=${quality} w=${widths[widthIdx]}`,
 		);
 	}
+
+	lastFocusedQuality = quality;
+	lastFocusedWidthIdx = widthIdx;
 
 	tryRemove(tmpPng);
 
@@ -621,6 +641,39 @@ export async function capture_if_changed(): Promise<CaptureResult | null> {
 
 export async function capture_screen_now(): Promise<CaptureResult> {
 	return captureSmartDisplay();
+}
+
+/**
+ * Capture every connected display. Returns one CaptureResult per display in
+ * index order. Used when the user asks about content spanning multiple
+ * monitors ("what's on all my screens?", "check my other monitor"). Each
+ * frame is captured independently — there's no native multi-display rect API
+ * before macOS 15.2, and even there iterating per display gives the model
+ * cleaner per-monitor context strings.
+ */
+export async function capture_all_displays(): Promise<CaptureResult[]> {
+	const displays = await list_displays();
+	const results: CaptureResult[] = [];
+	const prev = defaultDisplay;
+	try {
+		for (const d of displays) {
+			defaultDisplay = d.index;
+			try {
+				const cap = captureFullDisplay();
+				results.push({
+					...cap,
+					display_context: `Display ${d.index}: ${d.name}`,
+				});
+			} catch (err) {
+				console.error(
+					`[capture] all_displays: skipped display ${d.index} (${d.name}): ${err}`,
+				);
+			}
+		}
+	} finally {
+		defaultDisplay = prev;
+	}
+	return results;
 }
 
 export async function native_screenshot(): Promise<string> {

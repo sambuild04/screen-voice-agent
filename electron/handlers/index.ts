@@ -3,7 +3,6 @@ import * as capture from "./capture.js";
 import * as memory from "./memory.js";
 import * as secrets from "./secrets.js";
 import * as plugins from "./plugins.js";
-import * as flashcards from "./flashcards.js";
 import * as oauth from "./oauth.js";
 import * as browser from "./browser.js";
 import * as cua from "./cua.js";
@@ -38,6 +37,7 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	capture_active_window: (a) => capture.capture_active_window(a as never),
 	capture_if_changed: () => capture.capture_if_changed(),
 	capture_screen_now: () => capture.capture_screen_now(),
+	capture_all_displays: () => capture.capture_all_displays(),
 	native_screenshot: () => capture.native_screenshot(),
 	list_displays: () => capture.list_displays(),
 	set_default_display: (a) => capture.set_default_display(a as never),
@@ -57,7 +57,12 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	watch_check: (a) => memory.watch_check(a as never),
 	watch_get_classifier: (a) => memory.watch_get_classifier(a as never),
 	watch_mark_fired: (a) => memory.watch_mark_fired(a as never),
-	watch_evaluate_classifier: (a) => misc.watch_evaluate_classifier(a as never),
+	watch_evaluate_classifier: (a) => memory.watch_evaluate_classifier(a as never),
+	watch_flush_digests: (a) => memory.watch_flush_digests(a as never),
+	watch_reset_unmatched: (a) => memory.watch_reset_unmatched(a as never),
+	watch_update: (a) => memory.watch_update(a as never),
+	watch_suppress_term: (a) => memory.watch_suppress_term(a as never),
+	watch_cleanup_stale: (a) => memory.watch_cleanup_stale(a as never),
 
 	get_secret: (a) => secrets.get_secret(a as never),
 	set_secret: (a) => secrets.set_secret(a as never),
@@ -72,12 +77,6 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	generate_plugin_code: (a) => plugins.generate_plugin_code(a as never),
 	judge_plugin_code: (a) => plugins.judge_plugin_code(a as never),
 	diagnose_plugin_failure: (a) => plugins.diagnose_plugin_failure(a as never),
-
-	get_flashcard_deck: () => flashcards.get_flashcard_deck(),
-	save_flashcard: (a) => flashcards.save_flashcard(a as never),
-	delete_flashcard: (a) => flashcards.delete_flashcard(a as never),
-	read_flashcard_file: (a) => flashcards.read_flashcard_file(a as never),
-	increment_flashcard_review: (a) => flashcards.increment_flashcard_review(a as never),
 
 	oauth_flow: (a) => oauth.oauth_flow(a as never),
 	oauth_refresh: (a) => oauth.oauth_refresh(a as never),
@@ -99,6 +98,9 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	stop_learning_audio: () => learning.stop_learning_audio(),
 	flush_learning_audio: () => learning.flush_learning_audio(),
 	check_learning_audio: (a) => learning.check_learning_audio(a as never),
+	start_watcher_audio: () => learning.start_watcher_audio(),
+	stop_watcher_audio: () => learning.stop_watcher_audio(),
+	check_watcher_audio: () => learning.check_watcher_audio(),
 	check_screen_for_language: (a) => learning.check_screen_for_language(a as never),
 	check_screen_text: () => learning.check_screen_text(),
 	check_audio_for_language: (a) => learning.check_audio_for_language(a as never),
@@ -110,7 +112,6 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	web_search: (a) => learning.web_search(a as never),
 	web_search_openai: (a) => learning.web_search_openai(a as never),
 	web_read: (a) => learning.web_read(a as never),
-	fetch_genius_lyrics: (a) => learning.fetch_genius_lyrics(a as never),
 
 	transcribe_audio: (a) => wakeWord.transcribe_audio(a as never),
 
@@ -129,6 +130,8 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	desktop_scroll: (a) => misc.desktop_scroll(a as never),
 	focus_app: (a) => misc.focus_app(a as never),
 	press_element: (a) => misc.press_element(a as never),
+	ax_type: (a) => misc.ax_type(a as never),
+	get_user_activity: () => misc.get_user_activity(),
 	check_accessibility_permission: () => misc.check_accessibility_permission(),
 	skill_list_summaries: () => misc.skill_list_summaries(),
 	skill_delete: (a) => misc.skill_delete(a as never),
@@ -143,7 +146,7 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	ax_observer_status: () => axObserver.ax_observer_status(),
 };
 
-// Tauri auto-converts camelCase args to snake_case; replicate that here.
+// Frontend uses camelCase but handlers expect snake_case; convert here.
 function toSnakeCase(str: string): string {
 	return str.replace(/[A-Z]/g, (ch) => `_${ch.toLowerCase()}`);
 }
