@@ -3,8 +3,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 const STORAGE_KEY = "samuel-ui-prefs";
 
 // ── Schema-driven UI preferences ──────────────────────────────────────────
-// Every voice-adjustable property is declared once here. The schema drives
-// state shape, CSS vars, the update_ui tool, and the query_ui_state tool.
+// Every adjustable property is declared once here. The schema drives state
+// shape and CSS vars. SettingsPanel mutates this via applyUpdate; plugins
+// can also call applyUIUpdate (session-bridge) to mutate the same state.
 
 type PropType = "number" | "boolean" | "enum";
 
@@ -289,8 +290,6 @@ export interface UseUIPreferencesReturn {
   applyUpdate: (payload: UIUpdatePayload) => string;
   resetAll: () => void;
   cssVars: Record<string, string>;
-  getSchema: () => typeof SCHEMA;
-  getState: () => UIPreferences;
 }
 
 export function useUIPreferences(): UseUIPreferencesReturn {
@@ -322,7 +321,7 @@ export function useUIPreferences(): UseUIPreferencesReturn {
         );
         if (!fuzzy) {
           console.warn(`[ui-prefs] unknown setting: ${rawKey}`);
-          return `Unknown setting: ${rawKey}. Use query_ui_state to see available settings.`;
+          return `Unknown setting: ${rawKey}.`;
         }
         return applyOne(fuzzy, value);
       }
@@ -361,9 +360,6 @@ export function useUIPreferences(): UseUIPreferencesReturn {
 
   const resetAll = useCallback(() => { setPrefs({ ...DEFAULTS }); }, []);
 
-  const getSchema = useCallback(() => SCHEMA, []);
-  const getState = useCallback(() => prefs, [prefs]);
-
   // Build CSS variables from schema
   const cssVars = useMemo(() => {
     const vars: Record<string, string> = {};
@@ -386,7 +382,7 @@ export function useUIPreferences(): UseUIPreferencesReturn {
     return vars;
   }, [prefs]);
 
-  return { prefs, applyUpdate, resetAll, cssVars, getSchema, getState };
+  return { prefs, applyUpdate, resetAll, cssVars };
 }
 
 // ── Exported for tool descriptions ──

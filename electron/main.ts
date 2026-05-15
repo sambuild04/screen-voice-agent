@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, shell } from "electron";
 import path from "node:path";
 import { execFile } from "node:child_process";
 
@@ -52,6 +52,19 @@ function createWindow() {
   } else {
     mainWindow.loadFile(path.join(__dirname, "..", "dist-ui", "index.html"));
   }
+
+  // Route window.open() calls (e.g. external links inside show_content panels)
+  // to the user's default browser instead of spawning a new Electron window.
+  // Without this handler Electron's modern default is { action: "deny" },
+  // which silently swallows clicks inside Samuel's show_content overlays.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+      shell.openExternal(url).catch((err) => {
+        console.error("[shell.openExternal] failed:", err);
+      });
+    }
+    return { action: "deny" };
+  });
 
   if (process.platform === "darwin") {
     requestAccessibilityPermission();

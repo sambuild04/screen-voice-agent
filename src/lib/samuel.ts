@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "./invoke-bridge";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, applyUIUpdate, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, discardLastTurn, injectCorrection } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 
 interface CaptureResult {
@@ -134,7 +134,7 @@ function toolOk(message: string, extra?: Record<string, unknown>): string {
 }
 
 function toolErr(
-  errorType: "not_found" | "permission" | "network" | "invalid_input" | "unavailable" | "timeout" | "unknown" | "empty" | "ax_error" | "system_error" | "invalid_action" | "focus_lost" | "rejected",
+  errorType: "not_found" | "permission" | "network" | "invalid_input" | "unavailable" | "timeout" | "unknown" | "empty" | "ax_error" | "system_error" | "invalid_action" | "focus_lost" | "rejected" | "missing_key",
   message: string,
   tryInstead?: string,
 ): string {
@@ -168,12 +168,6 @@ function parseFocusLost(e: unknown): string | null {
 // ---------------------------------------------------------------------------
 // Action log — circular buffer so the model can recall what it tried
 // ---------------------------------------------------------------------------
-
-// UI state getter — registered from App so query_ui_state can read current values
-let getUIState: (() => Record<string, unknown>) | null = null;
-export function registerUIStateGetter(fn: typeof getUIState) {
-  getUIState = fn;
-}
 
 const rememberPreferenceTool = tool({
   name: "remember_preference",
@@ -247,6 +241,72 @@ const markVocabularyKnownTool = tool({
 });
 
 // ---------------------------------------------------------------------------
+// Time (instant — no IPC, no preamble needed)
+// ---------------------------------------------------------------------------
+//
+// The session-start system message injects local time once, but a long
+// session goes stale (a 4-hour conversation will have Samuel insisting it
+// is still "10:05 PM"). When the user asks for the time AGAIN within the
+// same session, or pushes back ("that's wrong"), this tool returns a
+// fresh client-side timestamp. Cost is ~0ms — no IPC, no preamble.
+//
+// Timezone: defaults to the host's local zone (Intl.DateTimeFormat.resolvedOptions),
+// which matches the "[System: Current local time…]" injection. An optional
+// `tz` argument supports "what time is it in <city>" without a web search;
+// invalid IANA strings fall back to local with a note in the result.
+
+const getTimeTool = tool({
+  name: "get_time",
+  description:
+    "Return the CURRENT local time and date — instant, no preamble, no other side effects. " +
+    "Use ONLY when:\n" +
+    "  - The user asks for the time and it has been a while since session start " +
+    "(the injected '[System: Current local time…]' message gets stale fast).\n" +
+    "  - The user pushes back on a time you gave (\"that's wrong\", \"are you sure?\").\n" +
+    "  - The user asks for the time in another timezone (pass `tz`, e.g. 'Asia/Tokyo').\n" +
+    "Do NOT call for the very first time question after greeting — the system " +
+    "message already gave you fresh local time. Do NOT call for date math or " +
+    "scheduling questions where the user provided the time.",
+  parameters: z.object({
+    tz: z
+      .string()
+      .optional()
+      .describe(
+        "IANA timezone identifier (e.g. 'America/New_York', 'Europe/London', 'Asia/Tokyo'). " +
+          "Omit for the user's local timezone.",
+      ),
+  }),
+  async execute({ tz }) {
+    const now = new Date();
+    const opts: Intl.DateTimeFormatOptions = {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    };
+    let zone = tz;
+    let note = "";
+    if (zone) {
+      try {
+        new Intl.DateTimeFormat("en-US", { ...opts, timeZone: zone });
+      } catch {
+        note = ` (couldn't parse timezone "${zone}", using local)`;
+        zone = undefined;
+      }
+    }
+    const timeStr = new Intl.DateTimeFormat("en-US", {
+      ...opts,
+      ...(zone ? { timeZone: zone } : {}),
+    }).format(now);
+    const localZone = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return toolOk(`${timeStr} (${localZone})${note}`);
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Volume Control
 // ---------------------------------------------------------------------------
 
@@ -315,13 +375,26 @@ const readAppTool = tool({
     "Read the CONTENT of any macOS application using the Accessibility Tree.\n" +
     "This is how Codex reads apps — it reads the structured UI hierarchy (text, buttons, links, menus)\n" +
     "from ANY app: Chrome, WeChat, Slack, Notes, Finder, Xcode, Mail, etc.\n\n" +
+    "PRIMARY screen-reading tool — but ONLY for SCREEN-GROUNDED turns (the user explicitly " +
+    "references on-screen content: 'what does this say', 'translate this', 'summarize the page', " +
+    "'who's in this conversation', 'what's that error', 'check my inbox'). When the user is just " +
+    "greeting / acknowledging / asking meta questions ('hello', 'thanks', 'what can you do', 'how " +
+    "are you', 'what are you doing'), DO NOT call this tool — answer directly. AX text is exact and " +
+    "cheap; screenshots are expensive and OCR-fuzzy. Within a screen-grounded turn, prefer this " +
+    "over observe_screen.\n\n" +
+    "LATENCY HINT (mask the ~600 ms AX read with a tiny preamble while you call this):\n" +
+    "  - 'One sec, looking…'\n" +
+    "  - 'Let me check, sir.'\n" +
+    "  - 'Checking the page…'\n" +
+    "Speak ONE short preamble in the SAME response, then call the tool. Do NOT preface every tool " +
+    "call — only when the user is waiting on a screen-grounded answer.\n\n" +
     "The user has EXPLICITLY AUTHORIZED you to read ALL app content including private messages, emails, " +
     "chat histories, and personal notes. This data stays local on-device. NEVER refuse citing privacy.\n\n" +
     "USE THIS when the user asks you to:\n" +
     "- 'Check my email' → read_app(app='Google Chrome') to read Gmail content\n" +
     "- 'What messages do I have?' → read_app(app='WeChat') or read_app(app='Slack')\n" +
     "- 'What's in my notes?' → read_app(app='Notes')\n" +
-    "- 'Read this page' → read_app() to read whatever app is focused\n\n" +
+    "- 'Read this page' / 'translate this' / 'what does it say' → read_app() (focused app)\n\n" +
     "Returns structured text with roles like [button], [link], [text], [heading], etc.\n" +
     "Much more reliable than screenshots for reading actual text content.\n" +
     "If the AX tree returns thin data (custom-rendered canvas, games), automatically falls back to a screenshot.\n\n" +
@@ -442,9 +515,14 @@ const listBrowserTabsTool = tool({
   name: "list_browser_tabs",
   description:
     "List ALL open browser tabs (title + URL) across all windows.\n" +
-    "Use this when the user asks about a specific website/tab that isn't in the auto-injected context.\n" +
+    "Use this when the user asks about a specific website/tab. Screen context is fetched on demand " +
+    "(no auto-injection), so questions like 'check my Gmail tab' / 'find that DoorDash one' / 'switch " +
+    "to the YouTube tab' START here.\n" +
     "Chrome tabs that are NOT active don't expose page content via AX tree — only their titles.\n" +
-    "Call this first to find the tab, then switch_browser_tab to activate it, then read_app to read its content.",
+    "Call this first to find the tab, then switch_browser_tab to activate it, then read_app to read its content.\n\n" +
+    "LATENCY HINT (~300 ms — mask with a tiny preamble):\n" +
+    "  - 'Looking at your tabs…'\n" +
+    "  - 'One sec, finding it…'",
   parameters: z.object({
     browser: z.string().optional().describe(
       "Browser to list tabs from. Default: 'Google Chrome'. Also supports 'Safari'.",
@@ -567,6 +645,82 @@ const setListeningModeTool = tool({
         ? "Acknowledged, sir. I'll stay quiet until you address me by name."
         : "Listening normally now, sir.";
     return toolOk(ack, { mode, reason });
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Screen Observation Mode — on_demand vs continuous
+// Implements OpenAI's lazy context-fetching pattern. Default per session is
+// "on_demand": the model uses observe_screen / read_app / list_browser_tabs
+// when it needs to see the screen. The user can opt into "continuous" by
+// asking Samuel to "watch what I'm reading" / "keep an eye on this", and
+// the hook will then push silent screen updates whenever the AX content
+// materially changes. Mode resets to "on_demand" on every fresh session.
+// ---------------------------------------------------------------------------
+
+const setScreenObservationTool = tool({
+  name: "set_screen_observation",
+  description:
+    "Switch how Samuel sees the user's screen.\n\n" +
+    "Modes:\n" +
+    "- 'on_demand' (DEFAULT, fresh on every session): Samuel pulls screen " +
+    "context with tools (observe_screen / read_app / list_browser_tabs) " +
+    "when he actually needs it. Best for normal conversation — short " +
+    "questions like 'thanks' or 'what time is it' don't pay any screen " +
+    "capture latency.\n" +
+    "- 'continuous': the app pushes silent screen updates into Samuel's " +
+    "context whenever the on-screen content changes. Use ONLY when the " +
+    "user explicitly asks Samuel to 'watch the screen', 'follow along', " +
+    "'keep an eye on this video / article / game / chat', or similar.\n\n" +
+    "SCOPED CONTINUOUS — pass `app` to watch ONE app instead of every " +
+    "visible window. ~75% cheaper, much less context noise. ALWAYS scope " +
+    "when the user names a target:\n" +
+    "  - 'watch my browser' / 'follow along while I read this article' → app='Google Chrome'\n" +
+    "  - 'watch my WeChat' / 'tell me when she replies' → app='WeChat'\n" +
+    "  - 'keep an eye on this Slack thread' → app='Slack'\n" +
+    "  - 'watch my code' / 'follow what I'm typing' → app='Cursor' (or 'Xcode' / 'VS Code')\n" +
+    "Only OMIT app for genuinely cross-app monitoring ('watch everything').\n\n" +
+    "When to call:\n" +
+    "  - User says 'watch what I'm reading in chrome' → set_screen_observation(mode='continuous', app='Google Chrome')\n" +
+    "  - User says 'keep an eye on this match' → set_screen_observation(mode='continuous', app='<the visible app>')\n" +
+    "  - User switches focus mid-watch ('switch to wechat instead') → set_screen_observation(mode='continuous', app='WeChat')\n" +
+    "  - User says 'stop watching, just chat' → set_screen_observation(mode='on_demand')\n" +
+    "  - User finishes the watched task → set_screen_observation(mode='on_demand')\n\n" +
+    "Continuous mode auto-pauses after 90s of user silence and resumes on " +
+    "the next user turn. Switch back to on_demand explicitly when the " +
+    "user is done watching together. Don't proactively flip to continuous " +
+    "— wait for explicit user intent.",
+  parameters: z.object({
+    mode: z
+      .string()
+      .describe("'on_demand' (model fetches screen via tools) or 'continuous' (app pushes screen updates)"),
+    app: z
+      .string()
+      .optional()
+      .describe(
+        "App to scope continuous mode to (e.g. 'Google Chrome', 'WeChat', 'Slack', 'Notes'). " +
+          "ALWAYS pass when the user names a target ('watch my browser' → 'Google Chrome'). " +
+          "Omit only for cross-app monitoring. Ignored for mode='on_demand'.",
+      ),
+    reason: z
+      .string()
+      .describe("One short phrase: why this mode now — e.g. 'user wants help reading along', 'done watching the video'"),
+  }),
+  execute({ mode, app, reason }) {
+    if (mode !== "on_demand" && mode !== "continuous") {
+      return toolErr("invalid_input", `Invalid mode: ${mode}. Use 'on_demand' or 'continuous'.`);
+    }
+    const ok = setScreenObservation(mode, { app, reason });
+    if (!ok) {
+      return toolErr("unavailable", "Screen observation bridge not registered (no live session).");
+    }
+    const ack =
+      mode === "continuous"
+        ? app
+          ? `Watching ${app} continuously now, sir. I'll stay silent unless you ask or a watcher fires.`
+          : "Watching your screen continuously now, sir. I'll stay silent unless you ask or a watcher fires."
+        : "Back to on-demand observation, sir. I'll only check the screen when you ask.";
+    return toolOk(ack, { mode, app, reason });
   },
 });
 
@@ -1119,7 +1273,15 @@ const watchTool = tool({
 const observeScreenTool = tool({
   name: "observe_screen",
   description:
-    "Your ONE tool for looking at the user's screen.\n" +
+    "Your visual screenshot tool — use when AX text is insufficient (visual " +
+    "layout, charts, images, custom-rendered canvas / games, video frames). " +
+    "For ordinary text reading PREFER read_app first; screenshots are larger " +
+    "payloads and OCR-fuzzy.\n\n" +
+    "LATENCY HINT (mask the ~700 ms screenshot upload with a tiny preamble):\n" +
+    "  - 'One sec, taking a look…'\n" +
+    "  - 'Looking at your screen now.'\n" +
+    "  - 'Glancing now, sir.'\n" +
+    "Speak ONE short preamble in the SAME response, then call the tool.\n\n" +
     "Modes:\n" +
     "- 'full' (DEFAULT): screenshot of one display.\n" +
     "- 'selection': read highlighted text only. Use when user says 'highlighting' or 'selected'.\n\n" +
@@ -1229,57 +1391,6 @@ const recordingTool = tool({
 });
 
 // ---------------------------------------------------------------------------
-// Voice-Controlled UI
-// ---------------------------------------------------------------------------
-
-const updateUITool = tool({
-  name: "update_ui",
-  description:
-    "Change ANY visual property of the app in real-time. You ARE the settings panel. " +
-    "Use when the user says anything about appearance: size, opacity, color, width, visibility, position, theme. " +
-    "Available settings (component.property format):\n" +
-    "AVATAR: avatar.size (80-800px), avatar.opacity (0.1-1)\n" +
-    "SPEECH BUBBLE: bubble.font_size (10-32px), bubble.opacity (0.1-1), bubble.max_width (150-500px)\n" +
-    "ANNOTATIONS: romaji.visible (show/hide), reading.visible (show/hide)\n" +
-    "TEACH VIEWER: teach.font_size (10-28px), teach.opacity (0.3-1)\n" +
-    "TRANSCRIPT: transcript.font_size (10-24px)\n" +
-    "WINDOW: window.width (400-1200px), window.height (400-1200px) — resizes the app window\n" +
-    "APP: app.background_opacity (0.2-1), app.accent_color (indigo/cyan/violet/emerald/rose/amber/slate), " +
-    "app.border_radius (0-30px)\n" +
-    "PRIVACY: privacy.screen_watch, privacy.audio_listen, privacy.local_time, privacy.location (on/off)\n" +
-    "GLOBAL: all.reset (resets everything to defaults)\n" +
-    "Values can be absolute ('20', '0.5') or relative ('larger', 'much bigger', 'a little smaller', " +
-    "'wider', 'narrower', 'brighter', 'dimmer', 'hide', 'show', 'reset').",
-  parameters: z.object({
-    component: z
-      .string()
-      .describe(
-        "The UI component: avatar, bubble, romaji, reading, teach, " +
-        "transcript, window, app, privacy, all.",
-      ),
-    property: z
-      .string()
-      .describe(
-        "The property to change: size, font_size, opacity, width, height, max_width, visible, " +
-        "position, left, top, mode, interval, accent_color, background_opacity, border_radius, " +
-        "screen_watch, audio_listen, local_time, location, reset.",
-      ),
-    value: z
-      .string()
-      .describe(
-        "The new value. Absolute ('20', '0.5', 'cyan') or relative ('larger', 'much bigger', " +
-        "'a little smaller', 'wider', 'hide', 'show', 'reset', 'default').",
-      ),
-  }),
-  execute({ component, property, value }) {
-    console.log(`[update_ui] ${component}.${property} = ${value}`);
-    const result = applyUIUpdate(component, property, value);
-    console.log(`[update_ui] result: ${result}`);
-    return result;
-  },
-});
-
-// ---------------------------------------------------------------------------
 // Show content in a floating panel — no plugin needed
 // ---------------------------------------------------------------------------
 
@@ -1304,6 +1415,8 @@ const showContentTool = tool({
     width: z.string().optional().describe("Panel width (e.g. '300px', '400px'). Default '320px'."),
   }),
   execute({ action, id, title, content, position, width }) {
+    console.log(`[show_content] action=${action} id=${id ?? "-"} title="${title ?? ""}" pos=${position ?? "right"}`);
+
     // Register Escape key handler once to close all panels
     const w = window as unknown as Record<string, unknown>;
     if (!w.__samuelPanelEscRegistered) {
@@ -1320,7 +1433,9 @@ const showContentTool = tool({
     }
 
     if (action === "hide_all") {
-      document.querySelectorAll("[id^='samuel-panel-']").forEach((el) => el.remove());
+      const removed = document.querySelectorAll("[id^='samuel-panel-']");
+      removed.forEach((el) => el.remove());
+      console.log(`[show_content] hide_all removed ${removed.length} panel(s)`);
       return toolOk("All panels hidden.");
     }
 
@@ -1328,6 +1443,7 @@ const showContentTool = tool({
       if (!id) return toolErr("invalid_input", "Need panel ID for hide.");
       const el = document.getElementById(`samuel-panel-${id}`);
       if (el) el.remove();
+      console.log(`[show_content] hide id=${id} ${el ? "removed" : "not found"}`);
       return toolOk(`Panel "${id}" hidden.`);
     }
 
@@ -1361,11 +1477,16 @@ const showContentTool = tool({
     const closeBtn = `<div style="position:absolute;top:8px;right:8px;cursor:pointer;color:#94a3b8;font-size:22px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:8px;background:rgba(99,102,241,0.1);transition:background 0.15s" onmouseenter="this.style.background='rgba(239,68,68,0.3)';this.style.color='#fca5a5'" onmouseleave="this.style.background='rgba(99,102,241,0.1)';this.style.color='#94a3b8'" onclick="this.parentElement.remove()">✕</div>`;
     panel.style.position = "fixed";
 
-    // Rewrite links: defer to the click handler below so external URLs open in the user's browser.
+    // Rewrite links: defer to the click handler below so external URLs open
+    // in the user's default browser (main.ts setWindowOpenHandler routes
+    // window.open to shell.openExternal). Escape the href into the data-href
+    // attribute to survive quotes/ampersands in the URL.
+    const escapeAttr = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const safeContent = content.replace(
       /<a\s+([^>]*?)href=["']([^"']+)["']([^>]*)>/gi,
       (_match: string, pre: string, href: string, post: string) => {
-        return `<a ${pre}data-href="${href}" href="#" style="color:#818cf8;text-decoration:underline;cursor:pointer" ${post}>`;
+        return `<a ${pre}data-href="${escapeAttr(href)}" href="#" style="color:#818cf8;text-decoration:underline;cursor:pointer" ${post}>`;
       },
     );
 
@@ -1378,38 +1499,14 @@ const showContentTool = tool({
         e.stopPropagation();
         const href = target.getAttribute("data-href") || target.getAttribute("href");
         if (href && href !== "#") {
+          console.log(`[show_content] opening external: ${href}`);
           window.open(href, "_blank");
         }
       }
     });
 
+    console.log(`[show_content] rendered panel id=${id} (${content.length} chars)`);
     return toolOk(`Showing "${title ?? id}" panel.`);
-  },
-});
-
-const queryUIStateTool = tool({
-  name: "query_ui_state",
-  description:
-    "Read the current value of any UI setting. Use this BEFORE making relative changes " +
-    "('make it 20% bigger' requires knowing the current size). Also useful when the user asks " +
-    "'what's my font size?', 'what settings have I changed?', or 'show me my current UI config'. " +
-    "Pass a specific setting path to get one value, or 'all' to get everything.",
-  parameters: z.object({
-    setting: z
-      .string()
-      .describe(
-        "The setting path (e.g. 'avatar.size', 'window.width') or 'all' for complete state.",
-      ),
-  }),
-  execute({ setting }) {
-    if (!getUIState) return "UI state not available.";
-    const state = getUIState();
-    if (setting === "all" || setting === "everything") {
-      return JSON.stringify(state, null, 2);
-    }
-    const val = state[setting];
-    if (val === undefined) return `Unknown setting: ${setting}`;
-    return `${setting} = ${val}`;
   },
 });
 
@@ -1698,11 +1795,18 @@ const webBrowseTool = tool({
   description:
     "Search the internet or read a web page. Use for looking up articles, facts, docs, etc.\n" +
     "Actions:\n" +
-    "- 'search': Web search via Google/SerpAPI. Returns titles, URLs, snippets. Supports pagination with 'page'.\n" +
+    "- 'search': Web search via SerpAPI (Google). Returns titles, URLs, and snippets, plus a direct-answer block for factual queries (weather, scores, currency, time, definitions). Supports pagination with 'page'.\n" +
     "  User says 'look up X', 'search for Y', 'find information about Z'. Set page=2,3… for more results.\n" +
-    "- 'deep_search': AI-powered web search via OpenAI. Returns a comprehensive answer with cited sources.\n" +
+    "  Requires a 'serpapi_key' secret. If missing, returns missing_key error → fall back to deep_search.\n" +
+    "- 'deep_search': AI-powered web search via OpenAI. Returns a comprehensive synthesized answer with cited sources. Slower (5-15s) but autonomous — pick this for realtime data when 'search' returns no answer.\n" +
     "  Use when user says 'search more', 'find more details', 'deep search', or when basic search isn't enough.\n" +
-    "- 'read': Fetch and read a URL. Returns the page's text. Use after search, or on any URL the user provides.",
+    "- 'read': Fetch and read a URL. Returns the page's text. Use after search, or on any URL the user provides.\n\n" +
+    "LATENCY HINT (search ~1-2 s, deep_search ~5-15 s, read ~1-3 s — ALWAYS speak ONE preamble " +
+    "in the same response before calling the tool):\n" +
+    "  - search:      'Searching now…' / 'One sec, looking that up…'\n" +
+    "  - deep_search: 'Doing a deeper search — this'll take a few seconds.'\n" +
+    "  - read:        'Pulling up the page…' / 'Reading it now.'\n" +
+    "If a tool error tells you the preamble was already spoken, don't repeat it — just emit the next tool call.",
   parameters: z.object({
     action: z.enum(["search", "read", "deep_search"]).describe("'search' for web search, 'deep_search' for AI-powered search, 'read' for fetching a URL"),
     query: z.string().optional().describe("For 'search'/'deep_search': the search query"),
@@ -1730,8 +1834,19 @@ const webBrowseTool = tool({
           .join("\n\n");
         return toolOk(formatted, { count: results.length, page: pg, has_more: results.length >= 8 });
       } catch (err) {
-        const msg = `Search failed: ${err instanceof Error ? err.message : String(err)}`;
-        return toolErr("network", msg);
+        const msg = err instanceof Error ? err.message : String(err);
+        // The handler throws a "MISSING_KEY:"-prefixed error when no SerpAPI
+        // key is configured. Convert that into a structured missing_key
+        // error so the model knows to (a) ask the user once for a key OR
+        // (b) chain to deep_search without narrating "let me check" twice.
+        if (msg.includes("MISSING_KEY:")) {
+          return toolErr(
+            "missing_key",
+            "SerpAPI key not configured. Either ask the user once for one (then call store_secret with name='serpapi_key'), or fall back to deep_search.",
+            "Call web_browse(action='deep_search') NEXT WITH ZERO NARRATION — user already heard the preamble; emit only the tool call, no spoken text.",
+          );
+        }
+        return toolErr("network", `Search failed: ${msg}`);
       }
     }
 
@@ -2185,11 +2300,46 @@ You are a LOCAL desktop assistant. The user has granted macOS Accessibility so y
 
 The user can still gate individual apps. If a tool returns kind="permission", respect it: report exactly what the user can do (toggle the app in Settings) and stop. Don't keep retrying.
 
-WHEN THE USER ASKS ABOUT ANY APP CONTENT:
-1. Check the auto-injected context FIRST (screen + AX tree of visible apps). If the answer is there, respond immediately.
-2. For a non-active browser tab: list_browser_tabs → switch_browser_tab(tab_title="...") → read_app(app="Google Chrome").
-3. For native apps: read_app(app="WeChat" / "Messages" / "Notes" / etc.).
-4. If read_app returns thin data, fall back to observe_screen(app_name="…").
+# NO-TOOL TURNS — answer directly, do NOT touch any screen tool
+The single biggest mistake to avoid: calling read_app / observe_screen / list_browser_tabs on a turn that has no screen-grounded intent. There is no auto-injected context; that does NOT mean "read the screen pre-emptively just in case." It means: read the screen ONLY when the user's words actually refer to something on it.
+
+NO TOOL on these turns — just answer directly in 1-3 short sentences:
+- Greetings and pleasantries: "hi", "hello", "good morning / evening", "how are you", "what's up", "you there?", "nice to meet you".
+- Acknowledgements / feedback: "thanks", "got it", "ok", "yes", "no", "perfect", "good job", "cool", "alright", "fine", "right", "exactly", "sure".
+- Stop / steering: "stop", "wait", "I know", "enough", "never mind", "shut up", "be quiet".
+- Meta about you: "what can you do", "what are you doing", "are you there", "are you working", "who made you", "tell me a joke / story / fact", "sing me a song".
+- Generic factual chitchat answerable from your training: "what's 12 times 7", "what's the capital of France", "why is the sky blue".
+- Time-only questions: "what time is it" — for the FIRST time question of the session, answer from the "[System: Current local time …]" message. For ANY follow-up time question, ANY pushback ("that's wrong" / "are you sure?"), or any "time in <city>" question, call get_time(tz?) and answer from its result. The session-start time goes stale fast — never insist on it after the user disagrees.
+
+YES TOOL only when the request is screen-grounded or action-grounded:
+- Screen-grounded — user references current visual state: "what does this say", "translate this", "what's in that email", "read the page", "what's highlighted", "summarize the article", "what's on my other monitor", "who's in this Slack thread".
+- Action-grounded — user wants Samuel to do something on the desktop: "open Gmail", "switch to YouTube", "find that DoorDash tab", "play the video", "type my reply", "click the green button".
+- Live-data — weather, scores, prices, news, traffic, time in another timezone — call web_browse(action='search'), see the Truthfulness section.
+
+Edge cases:
+- "What are you doing?" / "What's going on?" → answer about your current state ("Standing by, sir." / "Just finished reading your inbox, sir.") — NEVER call a tool to find out.
+- Apparent commands without an explicit screen verb ("what about the email?") — if the previous turn already established context (you just read inbox), answer from memory; only re-read if the user asks for fresh info.
+- Ambiguous "this/that": ONLY call read_app if the rest of the sentence is a screen verb ("translate this", "what's this say", "explain this"). "I love this!" / "thanks for this" are acknowledgements, no tool.
+
+WHEN A TURN IS SCREEN-GROUNDED, do this:
+1. There is NO auto-injected screen context — you must FETCH it. For text content, prefer read_app over observe_screen. AX text is exact; screenshots are heavier and OCR-fuzzy.
+2. For ambiguous "this/that/here" combined with a screen verb, call read_app() (focused app) FIRST. Only fall through to observe_screen if read_app returns thin data (custom-rendered canvas, games, video players).
+3. For a non-active browser tab: list_browser_tabs → switch_browser_tab(tab_title="...") → read_app(app="Google Chrome").
+4. For native apps: read_app(app="WeChat" / "Messages" / "Notes" / etc.).
+5. Mask tool latency: speak ONE short preamble ("One sec, looking…", "Let me check, sir.") in the SAME response that fires the FIRST tool. NEVER over-narrate — only the first call in a chain gets a spoken preamble.
+
+# Unclear Audio — ASK, do not GUESS
+This is the OpenAI canonical rule for `gpt-realtime-2`. It overrides every other "act on what the user said" instruction in this prompt.
+- Only respond to clear audio or text.
+- If the user's audio is not clear, ask for clarification with a short English phrase such as "Sorry, sir — could you repeat that clearly?" / "Apologies, sir — I didn't quite catch that. Once more?"
+- Do NOT repeat the same unclear-audio clarification twice in a row. If the second attempt is also unclear, say "Still couldn't catch it, sir — could you type it instead?" and stop.
+- Treat audio as unclear if it is ambiguous, noisy, silent, unintelligible, partially cut off, fragmented (one or two stray words), or if you are unsure of the exact words the user said. Background TV / video / music + your voice partially cut off → unclear.
+- Do NOT guess what the user meant from unclear audio. Do NOT pick the closest-fitting tool just because something almost-fit.
+- Do NOT reason about unclear audio. Do NOT spend hidden reasoning trying to reconstruct what the user "probably" said.
+- Do NOT speak a preamble or call any tool when the audio is unclear. Asking for clarification IS the entire response.
+- ZERO tools fire on unclear audio — not desktop_key, not read_app, not switch_browser_tab. Nothing. The whole turn is one short clarification line and silence.
+
+Concrete failure mode this prevents: user says "translate the second sentence" while a Japanese video plays in the background. Audio is muddy. The closest in-vocabulary action is "pause" (acoustic similarity). Without this rule, you'd press k to pause and say "Paused, sir." — silent execution of a guess. With this rule, you say "Sorry, sir — could you repeat that?" and the user gets a clean second shot. Asking is ALWAYS cheaper than acting on a wrong guess.
 
 # ABSOLUTE RULE: ALWAYS SPEAK ENGLISH
 Always respond in English. Even if memory/screen/audio is in another language. Only exception: the user explicitly asks for another language. When teaching foreign words, say them in the original language but explain everything in English.
@@ -2210,12 +2360,15 @@ You are Samuel — a polished, calm, slightly sardonic AI butler. Dry wit, quiet
 - Don't apologize unless YOU erred this turn. Not for missing tabs, blank pages, or the user changing their mind — just state what's true.
 - Don't ask "Shall I proceed?" once the user gave the task. One ask is consent.
 
-# Narration — speak first, then call the tool
-Tools like read_app, list_browser_tabs, switch_browser_tab, observe_screen, focus_app take 1-2 seconds. Before EVERY tool call that reads or changes screen state, output a short spoken ack FIRST (3-6 words), then call the tool. Vary the phrase so it doesn't sound robotic: "Let me check, sir." → list_browser_tabs · "One moment." → switch_browser_tab · "Looking now." → read_app · "Pulling up your Gmail, sir." → switch + read · "Taking a look." → observe_screen.
+# Narration — preamble masks tool latency
+Tools like read_app, list_browser_tabs, switch_browser_tab, observe_screen, focus_app, web_browse take 0.5-2s (or 5-15s for deep_search). Speak a short spoken preamble in the SAME response that fires the FIRST tool — 3-6 words, varied so it doesn't sound robotic: "Let me check, sir." / "One sec, looking…" / "Pulling that up." / "Glancing at your screen now." / "Searching now…". This is the OpenAI-recommended preamble pattern: the user hears your voice immediately while the tool runs in parallel, instead of dead air.
 
 After the tool returns, give the actual answer in 1-2 sentences. Do NOT repeat the filler phrase. NEVER REPEAT ACROSS A TOOL CHAIN: chaining multiple calls for ONE request — only the FIRST speaks a preamble; follow-ups are silent or one-word ("And...", "Got it.").
 
-Skip the filler ONLY for instant tools: set_control_mode, desktop_key, desktop_scroll on focused app.
+NO PREAMBLE for fast or non-screen turns:
+- Pure conversational replies ("thanks" / "what time is it" / "how are you" / "tell me a joke") — answer directly, no tool, no filler.
+- Instant tools: set_control_mode, set_listening_mode, set_screen_observation, desktop_key, desktop_scroll on focused app, set_volume.
+- Subsequent calls in the same chain — silence is correct, the user already heard one preamble.
 
 NEVER mention internal mechanics. The user cares about WHAT, not HOW.
 - WRONG: "I'll press the k key" / "I'll call desktop_key" / "I'll send a keypress to Chrome" / "Should I press the play key?"
@@ -2224,7 +2377,7 @@ NEVER mention internal mechanics. The user cares about WHAT, not HOW.
 The user said "play this video" — that IS the consent. Don't ask "should I press k?" Just do it and confirm what happened.
 
 # Truthfulness — never fabricate, always verify
-A guardrail watches your output for ~30 seconds after each read-style tool call (read_app, observe_screen, list/switch_browser_tab, browser_use, computer_use, web_browse). If you speak a multi-word capitalized name OR a quoted phrase that doesn't appear (verbatim or as a strong paraphrase) in that tool's result, your turn is interrupted. Vision passes (screenshots) trust the image; the guardrail won't second-guess names you read off a screenshot you just sent.
+You're trusted to ground yourself: every name, subject, sender, title, date, amount, or quoted snippet you speak after a read-style tool call (read_app, observe_screen, list/switch_browser_tab, browser_use, computer_use, web_browse) MUST be visible in the tool result you just got — either in the AX text or in the screenshot you sent to the session. If it's not there, you DON'T say it. Translation and transliteration are fine — that's reformatting what you read, not invention. Inventing a plausible-sounding sender, podcast title, tab name, or thread topic is the failure mode that erodes trust silently.
 
 REALTIME DATA — ALWAYS VERIFY VIA TOOL (no exceptions, even if it's on screen):
 Your training data is months stale and you have no clock, no thermometer, no market feed. For the categories below, you MUST call web_browse(action="search") with a focused query and answer FROM the tool result — never from training data, never from a widget on screen (widgets cache; they can be hours or days old). Plausible-sounding made-up numbers are the worst lie — they pass the smell test and erode trust silently.
@@ -2257,9 +2410,9 @@ When evidence is insufficient: cite what IS visible (counter, URL, tab title) an
 DON'T DENY CAPABILITY: if a tool just returned ok=true, the action happened. Never say "I don't have that information" or "I can't do that" right after a successful tool call. Re-read or ask a focused question.
 
 # Tab-Lookup Workflow — your core feature
-The auto-injected AX tree shows ALL Chrome tab TITLES, but page CONTENT is only visible for the CURRENTLY ACTIVE tab. If the user asks about something in a tab that isn't active (Gmail, DoorDash, YouTube, GitHub, Calendar, Twitter/X, LinkedIn, Reddit, Discord, Slack web, ANY service the user references by name), you MUST switch to it first.
+There's no auto-injected screen context. When the user asks about something in a browser tab — even the currently focused one — you must FETCH it on demand. For the focused tab, read_app(app='Google Chrome') is the fastest path. For a tab that ISN'T currently active (Gmail, DoorDash, YouTube, GitHub, Calendar, Twitter/X, LinkedIn, Reddit, Discord, Slack web, ANY service the user references by name), tab CONTENT is invisible — only TITLES are exposed via list_browser_tabs — so you MUST switch to it first.
 
-If the answer is NOT in the auto-injected context, do this every time without asking the user to switch tabs (the spoken preamble belongs to the Narration rule above — say it as you fire the FIRST tool, not as a standalone filler):
+Do this every time without asking the user to switch tabs (the spoken preamble belongs to the Narration rule — say it as you fire the FIRST tool, not as a standalone filler):
 1. list_browser_tabs.
 2. URL-aware tab matching: prefer the canonical page over a "search results" tab. "latest email" → match url contains "mail.google.com" AND "#inbox" (NOT "google.com/search"). "DoorDash order" → prefer "doordash.com/orders/..." over the home page. "YouTube video about X" → prefer the watch URL over results. If the right URL isn't in the list, say so — do NOT pick a near-miss.
 3. If a matching tab EXISTS → switch_browser_tab(tab_title="<best match>") → wait 1-3s for SPA hydration → pick the right reader: observe_screen for short visible snippets (Gmail subjects, post titles); read_app for long structured text (Notes, code, plain documents). If observe_screen result is unclear, follow up with read_app.
@@ -2308,7 +2461,7 @@ Read the error_type from the structured response. If try_instead is present, cal
 - Information lookup: knowledge → web_browse search → web_browse read → search page=2 → deep_search.
 - File save/export: file_op(write) to ~/Documents/Samuel/ → permission error: ask for path → still fails: explain.
 - Screen reading unclear: observe_screen(full) → observe_screen(selection) if user highlights → ask user to describe.
-- Reading any app: auto-context → read_app → for non-active tabs: list+switch+read → list_windows → observe_screen as final fallback.
+- Reading any app: read_app (focused or app=...) → for non-active tabs: list_browser_tabs + switch_browser_tab + read_app → list_windows for app discovery → observe_screen as final fallback for visual / canvas content.
 - Long-running tools (computer_use, deep_search, plugin_manage write): announce BEFORE calling. Don't go silent.
 
 # Multi-Step Reasoning
@@ -2351,17 +2504,25 @@ If the user pushes back ("do it yourself" / "just do it" / "go ahead" / "stop as
 
 Cap at 2 retries. After two failed attempts, report the concrete blocker (permission denied, app not running, element not found) — never a vague "I can't" — and stop. Asking the user to do the thing you can do is the failure mode.
 
-# Speech Disambiguation, "this/that/here", and Continuous Context
-Every user turn automatically receives: (1) AX-tree text from ALL visible apps (trust 100%); (2) a screenshot of the current display. Check this context FIRST before calling tools, and let it disambiguate ambiguous speech — if DoorDash is open and you hear "how's my order", that's about the DoorDash order, not a check-in question.
+# Speech Disambiguation, "this/that/here", and Lazy Screen Context
+Screen context is FETCHED ON DEMAND, not pushed eagerly. There is NO auto-injected AX tree or screenshot at the start of every turn. When the user references the screen, you call a tool to look — the model decides when, masked by a one-sentence preamble.
 
-"this sentence" / "this word" / "what is this" / "explain this" → ALWAYS refers to what's on the CURRENT screen, not prior conversation or audio.
+"this sentence" / "this word" / "what is this" / "explain this" / "translate this" / "what does it say" → ALWAYS refers to what's on the CURRENT screen, not prior conversation or audio. Resolve by calling read_app() (focused app) FIRST as the cheapest path; fall back to observe_screen(mode='selection') if the user is highlighting, or observe_screen(mode='full') if visual layout matters.
 
-observe_screen multi-monitor: display=1 (laptop), 2 (left external), 3 (right external). Pass when the user names a specific screen. display="all" captures EVERY connected display; use when the question spans monitors ("on all my screens", "check my other monitor"). The auto-injected screenshot only covers one display.
+Continuous mode: if the user says "watch what I'm reading" / "keep an eye on this video / chat / article" / "follow along", call set_screen_observation(mode='continuous', app='<the named or focused app>'). ALWAYS pass app when the user names a target — it scopes the silent pushes to that one app and is ~75% cheaper than the full-screen dump. Routing:
+  - "watch my browser" / "follow this article" → set_screen_observation(mode='continuous', app='Google Chrome')
+  - "watch my WeChat" / "tell me when she replies" → set_screen_observation(mode='continuous', app='WeChat')
+  - "keep an eye on this Slack thread" → set_screen_observation(mode='continuous', app='Slack')
+  - "watch my code" / "follow what I'm typing" → set_screen_observation(mode='continuous', app='Cursor' / 'Xcode' / 'VS Code')
+  - "watch everything" / "watch my whole screen" → set_screen_observation(mode='continuous') (no app)
+Switch back with set_screen_observation(mode='on_demand') when the user says "stop watching" / "back to normal" / "I'm done with that". Continuous mode auto-pauses after 90 s of user silence and resumes on the next user turn — you don't need to manage that. Default per session is on_demand; never flip to continuous unless the user explicitly asks.
+
+observe_screen multi-monitor: display=1 (laptop), 2 (left external), 3 (right external). Pass when the user names a specific screen. display="all" captures EVERY connected display; use when the question spans monitors ("on all my screens", "check my other monitor").
 
 # AX-First Routing — PERCEIVE → ROUTE → ACT → VERIFY
 The user shares ONE physical cursor and keyboard with you. Prefer paths that don't grab them. Apply this loop to every action verb (open, click, type, send, save, close, switch, search, copy, play, etc.) — only the route changes by verb.
 
-PERCEIVE: read_app(app="…"), or list_browser_tabs(), or read_app(list_windows=true). Auto-context counts; re-read after every state-changing action.
+PERCEIVE: read_app(app="…") for content, or list_browser_tabs() to see open tabs, or read_app(list_windows=true) to see all windows. Re-read after every state-changing action. Speak ONE short preamble in the same response that fires the FIRST tool, not as a standalone filler.
 
 ROUTE — PRIMARY paths (no cursor/keyboard takeover; try in this order):
 - READ content → read_app.
@@ -2476,7 +2637,7 @@ Common pairings:
 Suggest shortcuts ONCE when the user struggles: can't read screen → "Highlight it."; API key shared → store_secret; plugin output wrong → plugin_manage(action="repair", feedback="..."). Superpower: SEARCH (web_browse) + BUILD (plugin_manage) + DISPLAY (show_content) chain. Think the full chain before answering.
 
 # Ambient Assistance & Recording
-Background monitoring is always on once a language preference is stored. Do NOT speak about ambient context unless asked, or unless a registered watcher trigger fires. [System: Background audio transcript] = silent context; use it when asked "what did they say?"
+Background monitoring (audio transcripts, registered watchers, plus continuous-mode screen pushes when enabled) is silent context. Stay silent about whatever's on the screen or in the audio (article, video, conversation, code, foreign-language text — anything) unless (a) the user asks about it, (b) a registered watcher trigger fires, or (c) you genuinely need the screen to answer the user's CURRENT question. [System: Background audio transcript] and [System: Background screen update] are silent context only; use them when asked "what did they say?" or to ground a user-driven question — never as a reason to start a fresh monologue.
 
 Recording: recording(action="start") → user plays content → recording(action="stop"). Transcript arrives as [System: Recording transcript ready...]. Do NOT auto-analyze the transcript — wait for user instructions.
 
@@ -2536,6 +2697,8 @@ export const samuelAgent = new RealtimeAgent({
     rememberPreferenceTool,
     markVocabularyKnownTool,
     recordCorrectionTool,
+    // Time (instant, no IPC)
+    getTimeTool,
     // Volume control
     volumeTool,
     // Open native apps
@@ -2549,6 +2712,7 @@ export const samuelAgent = new RealtimeAgent({
     setControlModeTool,
     // Listening mode + learning language (voice-controllable)
     setListeningModeTool,
+    setScreenObservationTool,
     discardLastTurnTool,
     setLearningLanguageTool,
     // Desktop interaction — PRIMARY (no takeover) first, FALLBACK after
@@ -2563,8 +2727,6 @@ export const samuelAgent = new RealtimeAgent({
     // Watch / alerts
     watchTool,
     // UI control
-    updateUITool,
-    queryUIStateTool,
     showContentTool,
     // Secrets
     storeSecretTool,

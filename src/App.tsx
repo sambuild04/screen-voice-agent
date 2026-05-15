@@ -15,7 +15,6 @@ import { TeachDrop } from "./components/TeachDrop";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { sendTextAndRespond, registerUIUpdate, setVolume } from "./lib/session-bridge";
-import { registerUIStateGetter } from "./lib/samuel";
 
 export default function App() {
   const {
@@ -71,13 +70,9 @@ export default function App() {
     ui.applyUpdate({ component: "privacy", property: prop, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
 
-  // Expose full UI state so query_ui_state tool can read current values
-  useEffect(() => {
-    registerUIStateGetter(() => ui.prefs);
-    return () => registerUIStateGetter(null);
-  }, [ui.prefs]);
-
-  // Register UI update bridge so Samuel can change the UI by voice
+  // Register UI update bridge — used by plugins via plugin-loader's
+  // uiHelper.set(). The voice-tool layer was removed (see samuel.ts) but
+  // plugins can still mutate UI state through this bridge.
   useEffect(() => {
     registerUIUpdate((component, property, value) =>
       ui.applyUpdate({ component, property, value }),

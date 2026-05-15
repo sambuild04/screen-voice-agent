@@ -214,16 +214,13 @@ Four types of persistent local memory:
 
 ### Voice-Controlled Everything
 
-Samuel is his own settings panel. No menus, no preferences screen:
+Samuel responds to natural-language commands for the things that matter at runtime — appearance and visual UI knobs live in the in-app SettingsPanel:
 
 | You say | What happens |
 |---|---|
-| "Make yourself smaller" | Avatar shrinks |
-| "Make the window wider" | App window resizes |
-| "Show me a panel with my flight details" | Builds an HTML panel via `show_content` |
+| "Show me a panel with my flight details" | Builds an HTML overlay via `show_content` |
 | "Speak quieter" / "You're too loud" | Samuel's voice volume adjusts independently |
 | "Turn down the video" | macOS system volume adjusts |
-| "Reset the UI" | All visual settings restored |
 | "That's not my voice" / "Ignore that last one" | Last turn erased from memory + UI |
 | "I'm watching a video, ignore the audio" | Switches to passive listening |
 | "Take the wheel" / "Stay in the background" | Switches control mode |
@@ -322,7 +319,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | `discard_last_turn` | Erase the last turn from memory ("that wasn't me") |
 | `set_learning_language` | Activate ambient language tutoring |
 | `set_volume` | Adjust Samuel's voice or macOS system volume |
-| `update_ui` / `query_ui_state` / `show_content` | Voice-controlled UI changes |
+| `show_content` | Float a styled HTML panel over the desktop ("show me a panel with…") |
 | `oauth_connect` | Zero-config OAuth for Google/GitHub/Spotify |
 | `file_op` | Read, write, list files on disk |
 | `store_secret` | Secure API key storage |
@@ -346,7 +343,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | AX Tree | macOS Accessibility Tree multi-app reader |
 | Plugin Runtime | `new Function()` + secrets + UI injection + validates + wraps |
 | OAuth | PKCE + built-in client IDs (Google, GitHub, Spotify) |
-| Web Search | [SerpAPI](https://serpapi.com) (Google) + OpenAI deep search + Brave fallback |
+| Web Search | [SerpAPI](https://serpapi.com) (Google, with answer-box short-circuit) + OpenAI deep search |
 | Animation | [Rive](https://rive.app) |
 | Screen Capture | [Peekaboo](https://github.com/nicklama/peekaboo) + macOS `screencapture` + per-tab title match |
 | Audio Capture | ScreenCaptureKit (Swift), PID-level filtering |
@@ -362,6 +359,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
 - macOS 14+ (Sonoma or later)
 - Node.js 20+
 - OpenAI API key with Realtime API + GPT-5.5 access
+- (Optional but recommended) [SerpAPI](https://serpapi.com) key — enables fast Google search with answer-box short-circuit. Without one, factual queries fall through to OpenAI `deep_search` (slower; ~5–15 s per call).
 
 ### Install
 
@@ -385,6 +383,12 @@ npm run electron:dev
 ```
 
 Say **"Hey Samuel"** and start talking.
+
+To enable fast web search, hand Samuel a [SerpAPI](https://serpapi.com) key once via voice (he'll store it locally):
+
+> *"Here's my SerpAPI key: <paste-it>"*
+
+Or write it directly: `echo '{"serpapi_key":"<your-key>"}' > ~/.samuel/secrets.json`
 
 > Stuck? [Open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new) or join the [Discord](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Discord+invite+request).
 

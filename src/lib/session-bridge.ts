@@ -25,6 +25,19 @@ type SendTextAndRespondFn = (text: string) => void;
 type UIUpdateFn = (component: string, property: string, value: string) => string;
 type SetVolumeFn = (pct: number) => void;
 type SetPassiveListeningFn = (passive: boolean) => void;
+export type ScreenObservationMode = "on_demand" | "continuous";
+export interface ScreenObservationOptions {
+  /**
+   * App-scope filter for continuous-mode pushes. When set, the hook
+   * reads ONLY this app's accessibility tree on each tick (75% cheaper
+   * than the default multi-app dump). Common values: "Google Chrome",
+   * "Safari", "WeChat", "Slack", "Notes". Ignored for "on_demand".
+   */
+  app?: string;
+  /** Free-form reason for logs / debugging. */
+  reason?: string;
+}
+type SetScreenObservationFn = (mode: ScreenObservationMode, opts?: ScreenObservationOptions) => void;
 type DiscardLastTurnFn = (reason: string) => { removed: number; cancelled: boolean };
 type InjectCorrectionFn = (lesson: string) => void;
 
@@ -38,6 +51,7 @@ let sendTextAndRespondFn: SendTextAndRespondFn | null = null;
 let uiUpdateFn: UIUpdateFn | null = null;
 let setVolumeFn: SetVolumeFn | null = null;
 let setPassiveListeningFn: SetPassiveListeningFn | null = null;
+let setScreenObservationFn: SetScreenObservationFn | null = null;
 let discardLastTurnFn: DiscardLastTurnFn | null = null;
 let injectCorrectionFn: InjectCorrectionFn | null = null;
 
@@ -102,6 +116,38 @@ export function registerSetPassiveListening(fn: SetPassiveListeningFn | null) {
 export function setPassiveListening(passive: boolean): boolean {
   if (!setPassiveListeningFn) return false;
   setPassiveListeningFn(passive);
+  return true;
+}
+
+export function registerSetScreenObservation(fn: SetScreenObservationFn | null) {
+  setScreenObservationFn = fn;
+}
+
+/**
+ * Switch Samuel's screen observation mode.
+ *
+ * - "on_demand" (default): Samuel does NOT receive ambient screen pushes;
+ *   he calls observe_screen / read_app / list_browser_tabs as tools when
+ *   he needs to see what's on screen. Saves ~1-1.5 s of latency on every
+ *   turn that doesn't need the screen.
+ * - "continuous": the hook periodically polls the AX tree, and when the
+ *   on-screen content materially changes, pushes a fresh screenshot +
+ *   AX text into the conversation as a silent system message. Use when
+ *   the user explicitly asks Samuel to "watch the screen", "keep an eye
+ *   on this article", or similar.
+ *
+ * Optional `app` scopes continuous mode to a single application — much
+ * cheaper than the default all-visible-apps dump. "watch my browser" =>
+ * setScreenObservation("continuous", { app: "Google Chrome" }).
+ *
+ * Returns true if the bridge was registered (i.e. there's a live session).
+ */
+export function setScreenObservation(
+  mode: ScreenObservationMode,
+  opts?: ScreenObservationOptions,
+): boolean {
+  if (!setScreenObservationFn) return false;
+  setScreenObservationFn(mode, opts);
   return true;
 }
 
@@ -201,7 +247,7 @@ export function registerUIUpdate(fn: UIUpdateFn | null) {
   uiUpdateFn = fn;
 }
 
-/** Called by Samuel's update_ui tool to change UI properties via voice. */
+/** Called by plugins (via plugin-loader's uiHelper.set) to mutate UI state. */
 export function applyUIUpdate(component: string, property: string, value: string): string {
   if (!uiUpdateFn) {
     console.warn("[session-bridge] applyUIUpdate called but no uiUpdateFn registered");

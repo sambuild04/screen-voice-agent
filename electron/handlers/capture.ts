@@ -19,10 +19,18 @@ let autoScreenHash = 0;
 // the initial config never fits and we burn 6-7 sips re-encodings (~700ms
 // cumulative) per capture before settling at 1024@q=30. With this cache,
 // the second capture onwards converges in 1 sips invocation.
-let lastFullDisplayQuality = 55;
-let lastFullDisplayWidthIdx = 0;
-let lastFocusedQuality = 65;
-let lastFocusedWidthIdx = 0;
+//
+// Cache is PER-DISPLAY because different displays can have wildly different
+// pixel densities (e.g. a 4K Studio Display next to an HD external monitor)
+// and a single global cache thrashes when the active display switches.
+// In the field we observed Display 2 settling at q=55/1440 while Display 3
+// needed q=20/1024 — using Display 2's cache for Display 3's first capture
+// produced 7 wasted sips re-encodes (~800ms) per turn until it converged.
+type EncodingConfig = { quality: number; widthIdx: number };
+const fullDisplayCacheByDisplay = new Map<number, EncodingConfig>();
+const focusedCacheByApp = new Map<string, EncodingConfig>();
+const DEFAULT_FULL_DISPLAY: EncodingConfig = { quality: 55, widthIdx: 0 };
+const DEFAULT_FOCUSED: EncodingConfig = { quality: 65, widthIdx: 0 };
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -289,11 +297,12 @@ function captureFullDisplay(): CaptureResult {
 	// width down so we never bottom out at unreadable q=15.
 	const widths = [1440, 1200, 1024];
 	const SIZE_CAP = 140_000;
-	// Start from last successful config — first capture explores, subsequent
-	// ones converge in 1 sips call. Even on first run, biasing toward the
-	// known multi-display ceiling (1024@q=30) avoids 6 wasted re-encodes.
-	let quality = lastFullDisplayQuality;
-	let widthIdx = lastFullDisplayWidthIdx;
+	// Start from this display's last successful config. The first capture on
+	// a fresh display explores; subsequent captures on the same display
+	// converge in 1 sips call. Across displays, each gets its own entry.
+	const cached = fullDisplayCacheByDisplay.get(defaultDisplay) ?? DEFAULT_FULL_DISPLAY;
+	let quality = cached.quality;
+	let widthIdx = cached.widthIdx;
 	while (true) {
 		try {
 			execFileSync("/usr/bin/sips", [
@@ -310,21 +319,38 @@ function captureFullDisplay(): CaptureResult {
 
 		const size = statSync(tmpJpg).size;
 		if (size <= SIZE_CAP) break;
-		quality -= 10;
-		// Once quality drops below 35, shrink width before going lower.
-		if (quality < 35 && widthIdx < widths.length - 1) {
+		// Adaptive step-down: when we're way over budget (e.g. first capture on
+		// a 4K display starting from a 1080p cache), stepping quality by 10 at
+		// a time wastes 6+ sips invocations to converge. Scale the step with
+		// overshoot magnitude so we close the gap in ≤2 retries.
+		const ratio = size / SIZE_CAP;
+		if (ratio >= 3 && widthIdx < widths.length - 1) {
+			// 3x+ over: this display is genuinely high-DPI. Skip directly to
+			// the smallest width and a low quality — overshooting the bottom
+			// is fine because we still validate vs SIZE_CAP next iteration.
+			widthIdx = widths.length - 1;
+			quality = 35;
+		} else if (ratio >= 2 && widthIdx < widths.length - 1) {
 			widthIdx++;
-			quality = 50;
+			quality = 45;
+		} else {
+			quality -= 10;
+			// Once quality drops below 35, shrink width before going lower.
+			if (quality < 35 && widthIdx < widths.length - 1) {
+				widthIdx++;
+				quality = 50;
+			}
 		}
 		if (quality <= 20 && widthIdx === widths.length - 1) break;
 		console.error(
-			`[capture] JPEG too large (${size}B), retrying q=${quality} w=${widths[widthIdx]}`,
+			`[capture] JPEG too large (${size}B, ${ratio.toFixed(1)}x), retrying q=${quality} w=${widths[widthIdx]}`,
 		);
 	}
 
-	// Persist this config so the next capture skips the search entirely.
-	lastFullDisplayQuality = quality;
-	lastFullDisplayWidthIdx = widthIdx;
+	// Persist this display's converged config so the next capture skips the
+	// search entirely. Per-display, so an unrelated display's tighter limits
+	// don't make this display's cache pessimistic.
+	fullDisplayCacheByDisplay.set(defaultDisplay, { quality, widthIdx });
 
 	tryRemove(tmpPng);
 
@@ -513,8 +539,14 @@ end tell`;
 	// reliably; we mirror its sizing for observe_screen.
 	const widths = [1440, 1280, 1024];
 	const SIZE_CAP = 190_000;
-	let quality = lastFocusedQuality;
-	let widthIdx = lastFocusedWidthIdx;
+	// Per-app cache: the focused-window capture is keyed by the resolved app
+	// label (or "Desktop" / "fallback" when nothing matched). Different apps
+	// render very differently — Chrome with a 4K video can dwarf a Notes
+	// window — so a global cache thrashes when the focused app changes.
+	const focusedKey = (targetApp ?? requestedApp ?? appLabel ?? "default").toLowerCase();
+	const cachedFocus = focusedCacheByApp.get(focusedKey) ?? DEFAULT_FOCUSED;
+	let quality = cachedFocus.quality;
+	let widthIdx = cachedFocus.widthIdx;
 	while (true) {
 		try {
 			execFileSync("/usr/bin/sips", [
@@ -530,18 +562,29 @@ end tell`;
 		}
 		const sz = statSync(tmpJpg).size;
 		if (sz <= SIZE_CAP || quality <= 35) break;
-		quality -= 8;
-		if (quality < 50 && widthIdx < widths.length - 1) {
+		// Adaptive step-down (see captureFullDisplay for rationale): scale
+		// the step with overshoot ratio so a fresh, very large render
+		// converges in ≤2 retries instead of 5+.
+		const ratio = sz / SIZE_CAP;
+		if (ratio >= 2.5 && widthIdx < widths.length - 1) {
+			widthIdx = widths.length - 1;
+			quality = 50;
+		} else if (ratio >= 1.7 && widthIdx < widths.length - 1) {
 			widthIdx++;
-			quality = 65;
+			quality = 55;
+		} else {
+			quality -= 8;
+			if (quality < 50 && widthIdx < widths.length - 1) {
+				widthIdx++;
+				quality = 65;
+			}
 		}
 		console.error(
-			`[capture] focus JPEG too large (${sz}B), retry q=${quality} w=${widths[widthIdx]}`,
+			`[capture] focus JPEG too large (${sz}B, ${ratio.toFixed(1)}x), retry q=${quality} w=${widths[widthIdx]}`,
 		);
 	}
 
-	lastFocusedQuality = quality;
-	lastFocusedWidthIdx = widthIdx;
+	focusedCacheByApp.set(focusedKey, { quality, widthIdx });
 
 	tryRemove(tmpPng);
 

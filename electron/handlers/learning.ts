@@ -15,6 +15,30 @@ import {
 	record_vocabulary as memoryRecordVocabulary,
 	record_transcript as memoryRecordTranscript,
 } from "./memory.js";
+import { get_secret } from "./secrets.js";
+
+// Sentinel prefix for "no SerpAPI key configured" — the web_browse tool layer
+// detects this and returns a structured missing_key error so the model can
+// chain to deep_search without treating it like a transient network failure.
+const MISSING_KEY_PREFIX = "MISSING_KEY:";
+
+// Accept several common spellings so users don't have to rename an existing
+// secret. The canonical name (used in docs, prompts, and the store_secret
+// guidance) is "serpapi_key"; everything else is just a compat alias.
+const SERPAPI_KEY_ALIASES = [
+	"serpapi_key", // canonical
+	"SERPAPI_KEY", // env-var style (most common in pre-existing setups)
+	"serp_api_key",
+	"SERP_API_KEY",
+];
+
+async function loadSerpApiKey(): Promise<string | null> {
+	for (const name of SERPAPI_KEY_ALIASES) {
+		const v = await get_secret({ name });
+		if (v && v.trim()) return v.trim();
+	}
+	return null;
+}
 
 // ── Module-level state ──────────────────────────────────────────────────────
 
@@ -564,12 +588,6 @@ async function stopLearningAudioInternal(): Promise<void> {
 	console.error("[learning-audio] stopped");
 }
 
-// ── URL encoding ────────────────────────────────────────────────────────────
-
-function urlEncode(s: string): string {
-	return encodeURIComponent(s).replace(/%20/g, "%20");
-}
-
 // ── HTML helpers ────────────────────────────────────────────────────────────
 
 function extractHtmlTag(html: string, tag: string): string | null {
@@ -618,16 +636,6 @@ function stripHtmlToText(html: string): string {
 		.replace(/&apos;/g, "'")
 		.replace(/&quot;/g, '"')
 		.replace(/&#39;/g, "'");
-}
-
-function htmlEntityDecode(s: string): string {
-	return s
-		.replace(/&amp;/g, "&")
-		.replace(/&lt;/g, "<")
-		.replace(/&gt;/g, ">")
-		.replace(/&quot;/g, '"')
-		.replace(/&#39;/g, "'")
-		.replace(/&#x27;/g, "'");
 }
 
 function extractReadableText(html: string): string {
@@ -1669,6 +1677,20 @@ export async function transcribe_audio(args: {
 	return text;
 }
 
+// Web search backed by SerpAPI (Google engine). Replaces the previous
+// Brave HTML scraper which broke silently when Brave changed markup and
+// returned empty snippets. SerpAPI returns structured JSON including:
+//   - answer_box: direct-answer blocks for weather/scores/currency/time/etc.
+//                 (lets the model answer simple factual questions in ONE
+//                  round-trip instead of chaining to read_url or deep_search)
+//   - knowledge_graph: entity descriptions
+//   - organic_results: ranked title/url/snippet triples
+//
+// Requires the user to store a SerpAPI key via store_secret(name='serpapi_key').
+// If no key is configured, throws a sentinel-prefixed error so the tool layer
+// can return a structured missing_key error pointing to deep_search.
+//
+// Docs: https://serpapi.com/search-api
 export async function web_search(args: {
 	query: string;
 	page?: number;
@@ -1676,69 +1698,105 @@ export async function web_search(args: {
 	const pg = Math.max(args.page ?? 1, 1);
 	console.error(`[web] searching: ${args.query} (page ${pg})`);
 
-	// Try Brave HTML fallback directly (SerpAPI requires secrets module)
-	const results = await searchBrave(args.query);
-	console.error(`[web] brave: ${results.length} results`);
-	return results;
-}
+	const apiKey = await loadSerpApiKey();
+	if (!apiKey) {
+		throw new Error(
+			`${MISSING_KEY_PREFIX} No SerpAPI key configured (looked under ${SERPAPI_KEY_ALIASES.join(", ")}). Ask the user to provide one via store_secret(name='serpapi_key', value=...), or fall back to deep_search for this query.`,
+		);
+	}
 
-async function searchBrave(query: string): Promise<SearchResult[]> {
-	const encoded = urlEncode(query);
-	const url = `https://search.brave.com/search?q=${encoded}`;
+	// SerpAPI uses `start` as a 0-based offset (0, 10, 20…) — page 1 = start 0.
+	const params = new URLSearchParams({
+		engine: "google",
+		q: args.query,
+		api_key: apiKey,
+		num: "10",
+		start: String((pg - 1) * 10),
+	});
+
+	const url = `https://serpapi.com/search.json?${params.toString()}`;
 
 	const resp = await fetch(url, {
-		headers: {
-			"User-Agent":
-				"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-			Accept: "text/html,application/xhtml+xml",
-		},
 		signal: AbortSignal.timeout(10_000),
 	});
 
-	if (!resp.ok) throw new Error("Brave search request failed");
-
-	const html = await resp.text();
-	return parseBraveResults(html);
-}
-
-function parseBraveResults(html: string): SearchResult[] {
-	const results: SearchResult[] = [];
-	const marker = "search-snippet-title";
-	let pos = 0;
-
-	while (true) {
-		const idx = html.indexOf(marker, pos);
-		if (idx === -1) break;
-
-		const region = html.slice(idx, Math.min(idx + 500, html.length));
-
-		// Extract title
-		const titleMatch = region.match(/title="([^"]*)"/);
-		const title = titleMatch ? htmlEntityDecode(titleMatch[1]) : null;
-
-		// Extract URL from preceding href
-		const beforeStart = Math.max(0, idx - 500);
-		const before = html.slice(beforeStart, idx);
-		const hrefIdx = before.lastIndexOf('href="https://');
-		let url: string | null = null;
-		if (hrefIdx !== -1) {
-			const start = hrefIdx + 6;
-			const endQuote = before.indexOf('"', start);
-			if (endQuote !== -1) {
-				url = before.slice(start, endQuote);
-			}
-		}
-
-		if (title && url && !url.includes("brave.com") && !url.includes("cdn.search")) {
-			if (!results.some((r) => r.url === url)) {
-				results.push({ title, url, snippet: "" });
-				if (results.length >= 8) break;
-			}
-		}
-
-		pos = idx + marker.length;
+	if (!resp.ok) {
+		const errBody = await resp.text().catch(() => "");
+		throw new Error(
+			`SerpAPI request failed (${resp.status}): ${errBody.slice(0, 200)}`,
+		);
 	}
 
+	// SerpAPI is loosely typed — fields that don't apply to a given query are
+	// just missing rather than null. The shape below covers what we read.
+	const body = (await resp.json()) as {
+		answer_box?: {
+			snippet?: string;
+			answer?: string;
+			title?: string;
+			link?: string;
+			result?: string;
+		};
+		knowledge_graph?: {
+			title?: string;
+			description?: string;
+			source?: { link?: string };
+		};
+		organic_results?: Array<{
+			title?: string;
+			link?: string;
+			snippet?: string;
+		}>;
+		error?: string;
+	};
+
+	// SerpAPI returns HTTP 200 with an `error` field for quota/auth issues.
+	if (body.error) {
+		throw new Error(`SerpAPI error: ${body.error}`);
+	}
+
+	const results: SearchResult[] = [];
+
+	// answer_box first — the direct factual answer for queries like
+	//   "weather in Riverside" / "USD to JPY" / "time in Tokyo" / "Lakers score"
+	// lives here. Putting it as the first result lets the model speak the
+	// answer without needing a follow-up read_url.
+	const ab = body.answer_box;
+	if (ab) {
+		const ansText = ab.snippet ?? ab.answer ?? ab.result ?? "";
+		if (ansText) {
+			results.push({
+				title: ab.title ?? "Direct answer",
+				url: ab.link ?? "",
+				snippet: ansText,
+			});
+		}
+	}
+
+	// knowledge_graph — entity descriptions for "who is X" / "what is Y" style
+	// queries. Cheap to include and often answers the question directly.
+	const kg = body.knowledge_graph;
+	if (kg?.description) {
+		results.push({
+			title: kg.title ? `Knowledge graph: ${kg.title}` : "Knowledge graph",
+			url: kg.source?.link ?? "",
+			snippet: kg.description,
+		});
+	}
+
+	for (const r of body.organic_results ?? []) {
+		if (!r.title || !r.link) continue;
+		results.push({
+			title: r.title,
+			url: r.link,
+			snippet: r.snippet ?? "",
+		});
+		if (results.length >= 10) break;
+	}
+
+	console.error(
+		`[web] serpapi: ${results.length} results${ab ? " (answer_box)" : ""}${kg?.description ? " (knowledge_graph)" : ""}`,
+	);
 	return results;
 }
 

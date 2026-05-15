@@ -3,7 +3,8 @@ import { invoke, debugLog } from "../lib/invoke-bridge";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from "@openai/agents/realtime";
 import type { FunctionTool, RealtimeOutputGuardrail, RealtimeItem } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerDiscardLastTurn, registerInjectCorrection } from "../lib/session-bridge";
+import type { ScreenObservationMode } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerSetScreenObservation, registerDiscardLastTurn, registerInjectCorrection } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
 
 // ---------------------------------------------------------------------------
@@ -13,42 +14,27 @@ import { loadAllPlugins } from "../lib/plugin-loader";
 // is fed back to the model so it self-corrects.
 // ---------------------------------------------------------------------------
 
-// Module-level shared state for guardrails to access the latest tool result.
-// The hook below updates this on every agent_tool_end event so the
-// no_hallucination guardrail can verify specific factual claims.
-let __latestToolResult: { name: string; text: string; ts: number } | null = null;
-// When observe_screen runs, the actual content lives in an image we send to
-// the session — text-based claim verification can't see it. Track the most
-// recent vision pass so the guardrail can defer to vision instead of
-// (incorrectly) flagging Boshen Feng / Amazon.com / etc as hallucinated.
-let __latestVisionAtMs = 0;
-function updateLatestToolResult(r: { name: string; text: string; ts: number }) {
-  __latestToolResult = r;
-  if (r.name === "observe_screen" || r.name === "computer_use" || r.name === "browser_use") {
-    __latestVisionAtMs = r.ts;
-  }
-}
-
+// "Don't volunteer language lessons" used to be enforced as a tripwire
+// guardrail here, but it conflicted with the two paths the system prompt
+// already permits — explicit user requests and watcher-fired vocabulary
+// alerts.
+//
+// "no_hallucination_after_read" was also a tripwire guardrail — a regex
+// scanner that extracted multi-word capitalized names + quoted phrases
+// from Samuel's response and verified them against the latest tool
+// result haystack. Removed 2026-05-14: the regex approach is fundamentally
+// brittle. It caught some Gmail-sender hallucinations but also tripped on
+// legitimate translations (綾小路清隆 → "Kiyotaka Ayanokoji"), romanizations,
+// long quoted paraphrases, and any cross-language reading. The realtime
+// model already gets the tool result text + screenshots and is the right
+// judge of grounding; the prompt's "Truthfulness — never fabricate, always
+// verify" + "CITE BEFORE YOU SPEAK" rules carry the policy. The SDK's
+// tripwire response (cancel audio + apology+divert template) makes
+// false-positives much worse than the occasional ungrounded claim.
+//
+// The remaining guardrail catches one hard failure mode regex IS reliable
+// for: Samuel monologuing the same sentence three times in a row.
 const outputGuardrails: RealtimeOutputGuardrail[] = [
-  {
-    name: "no_unprompted_teaching",
-    policyHint:
-      "Do not teach or explain language vocabulary unless the user explicitly asked for it " +
-      "or there is confirmed audio/screen content in the target language. Stay silent about language unless prompted.",
-    async execute({ agentOutput }) {
-      const text = typeof agentOutput === "string" ? agentOutput : String(agentOutput);
-      const teachingPatterns = [
-        /\bin japanese\b.*\bmeans?\b/i,
-        /\bthe word\b.*\b(means?|is)\b/i,
-        /\bvocabulary\b.*\bword\b/i,
-        /\bI (heard|noticed|detected|saw)\b.*\b(japanese|chinese|korean)\b/i,
-        /\bN[1-5] level\b/i,
-      ];
-      const hasTeaching = teachingPatterns.some((p) => p.test(text));
-      const isUnprompted = hasTeaching && text.length < 300 && !text.includes("[System:");
-      return { tripwireTriggered: isUnprompted, outputInfo: { hasTeaching, length: text.length } };
-    },
-  },
   {
     name: "no_self_conversation",
     policyHint:
@@ -60,107 +46,6 @@ const outputGuardrails: RealtimeOutputGuardrail[] = [
       const unique = new Set(sentences);
       const isRepetitive = sentences.length > 3 && unique.size <= Math.ceil(sentences.length / 3);
       return { tripwireTriggered: isRepetitive, outputInfo: { sentences: sentences.length, unique: unique.size } };
-    },
-  },
-  {
-    name: "no_hallucination_after_read",
-    policyHint:
-      "STOP. You just claimed a specific name, subject, or detail that does NOT appear in " +
-      "the most recent tool result. NEVER invent email senders, subjects, dates, amounts, " +
-      "or any specific fact. If the AX tree didn't capture the content (Gmail/web apps " +
-      "often have sparse AX), say 'I don't see specific email content in the page — let " +
-      "me try a screenshot' and call observe_screen. NEVER hallucinate a plausible answer.",
-    async execute({ agentOutput }) {
-      const text = typeof agentOutput === "string" ? agentOutput : String(agentOutput);
-      // Only run within ~30s of the last read-style tool — that's when
-      // hallucination from AX-tree-was-thin is most likely.
-      const t = __latestToolResult;
-      if (!t) return { tripwireTriggered: false, outputInfo: { reason: "no tool result" } };
-      const ageMs = Date.now() - t.ts;
-      const RELEVANT_TOOLS = new Set([
-        "read_app", "list_browser_tabs", "switch_browser_tab", "observe_screen",
-        "browser_use", "computer_use", "web_browse",
-      ]);
-      if (!RELEVANT_TOOLS.has(t.name) || ageMs > 30_000) {
-        return { tripwireTriggered: false, outputInfo: { reason: "no recent read tool" } };
-      }
-      // If the model just took a vision pass (observe_screen / computer_use /
-      // browser_use), names and quoted strings it speaks should be coming
-      // from the image we sent to the session — not from training data. We
-      // can't verify image contents in text, so trust vision and skip
-      // text-claim checking. (Without this, real readings like "Boshen Feng"
-      // / "Amazon.com" got flagged because they're not in the placeholder
-      // result string "Screenshot captured…".)
-      if (Date.now() - __latestVisionAtMs < 30_000) {
-        return { tripwireTriggered: false, outputInfo: { reason: "recent vision pass — trusting image" } };
-      }
-      // Only check responses long enough to plausibly contain a claim.
-      if (text.length < 25) {
-        return { tripwireTriggered: false, outputInfo: { reason: "too short" } };
-      }
-      const haystack = t.text.toLowerCase();
-      // Detect specific factual claims that the model could hallucinate:
-      // Two consecutive Capitalized words (likely a person/sender name)
-      // or a quoted subject/title.
-      const namePattern = /\b([A-Z][a-z]{1,15}) ([A-Z][a-z]{1,20})\b/g;
-      const quotedPattern = /["“]([^"”]{4,80})["”]/g;
-      // Common sentence-starting words that look capitalized but aren't names.
-      // Without these, "My Calvin Rewards" trips because "My Calvin" gets
-      // flagged as a sender name when only "Calvin Rewards" is real.
-      const PRONOUN_OR_DEMONSTRATIVE = new Set([
-        "the", "your", "a", "an", "my", "our", "his", "her", "their",
-        "this", "that", "these", "those", "some", "each", "many", "few",
-        "all", "any", "both", "either", "neither", "no", "another", "such",
-        "what", "which", "whose", "i", "we", "you", "he", "she", "they", "it",
-        "let", "one", "two", "good", "hello", "sir", "yes", "no", "ok", "okay",
-      ]);
-      const claims = new Set<string>();
-      let m: RegExpExecArray | null;
-      while ((m = namePattern.exec(text)) !== null) {
-        const w1 = m[1].toLowerCase();
-        // Skip if the first word is a pronoun/demonstrative — the second word
-        // is the real candidate and will appear in a later regex iteration if
-        // it's part of a multi-word name.
-        if (PRONOUN_OR_DEMONSTRATIVE.has(w1)) continue;
-        const candidate = `${m[1]} ${m[2]}`;
-        // Filter conversational filler — but be careful not to swallow real
-        // honorific names like "Sir Henry". The "sir" branch was previously
-        // `sir [a-z]` which (case-insensitive) also dropped legit names.
-        if (/^(let me|one moment|good (morning|evening|night)|hello sir)$/i.test(candidate)) continue;
-        claims.add(candidate);
-      }
-      while ((m = quotedPattern.exec(text)) !== null) {
-        if (m[1].length >= 4) claims.add(m[1]);
-      }
-      if (claims.size === 0) {
-        return { tripwireTriggered: false, outputInfo: { reason: "no specific claims" } };
-      }
-      // Verify each claim. A claim is verified if EITHER the full phrase
-      // appears verbatim, OR a strong majority of its salient words appear
-      // in the haystack — paraphrasing "Calvin Klein Rewards" as "Calvin
-      // Rewards" should not be flagged as a hallucination.
-      const STOPWORDS = new Set([
-        "the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at",
-        "is", "it", "as", "by", "be", "with", "from", "this", "that", "these",
-        "those", "your", "my", "our", "his", "her", "their", "i", "you", "we",
-        "new", "way", "earn", "subject", "from", "received", "pm", "am",
-      ]);
-      const unverified: string[] = [];
-      for (const c of claims) {
-        const lc = c.toLowerCase();
-        if (haystack.includes(lc)) continue;
-        const salient = lc.split(/\W+/).filter((w) => w.length >= 3 && !STOPWORDS.has(w));
-        if (salient.length === 0) continue;
-        const found = salient.filter((w) => haystack.includes(w)).length;
-        // Treat as paraphrase-verified if ≥60% of salient words are present.
-        if (found / salient.length >= 0.6) continue;
-        unverified.push(c);
-      }
-      const tripped = unverified.length > 0;
-      return {
-        tripwireTriggered: tripped,
-        outputInfo: { tool: t.name, ageMs, unverified, claimCount: claims.size },
-      };
     },
   },
 ];
@@ -191,89 +76,90 @@ export interface TranscriptEntry {
 const HEARTBEAT_INTERVAL_MS = 30_000; // ping every 30s to prevent server-side idle timeout
 const SESSION_ROTATION_MS = 25 * 60 * 1000; // reconnect every 25 min (before 60-min hard cap)
 const CONTEXT_WINDOW_TURNS = 6; // carry this many turns across reconnections
-const AUTO_SCREEN_COOLDOWN_MS = 5_000; // min 5s between auto-screen injections to prevent token flood
-// When the AX content is identical to the previous inject AND we injected
-// within this window, skip the inject entirely. The model already has the
-// screenshot + AX in its conversation history. Larger window = less waste,
-// but eventually the user does want a fresh look — 60s is a balance.
-const CTX_DEDUP_WINDOW_MS = 60_000;
-// If transcript hasn't arrived this long after speech_stopped, fall back to capturing
-// context anyway — transcription is occasionally slow or fails.
-const TRANSCRIPT_WAIT_MS = 2_500;
-// Short utterances like "yes", "sounds good", "thanks" don't need a fresh screen
-// capture — the prior turn's context is still in the conversation. Skipping the
-// AX read + screenshot saves ~1-2s, ~150 KB of tokens, and a screenshot upload.
-// Pure single-thought acks: short reactions to the *previous* reply where
-// the current screen is NOT a new source of information. We intentionally
-// EXCLUDE bare imperatives like "do it", "do that", "tell me", "say it" —
-// those are either real commands (need fresh context) or mistranscriptions
-// of questions ("how are you doing" → "do it"); skipping context on them
-// produced the greeting-loop bug. The compositional form ("yes, do it" /
-// "ok, tell me") is still caught by COMPOSITIONAL_ACK_RE below.
-const ACK_PHRASES = new Set([
-  "ok", "okay", "yes", "yeah", "yep", "yup", "no", "nope", "sure",
-  "thanks", "thank you", "thx", "ty", "got it", "sounds good", "good",
-  "great", "cool", "nice", "alright", "right", "correct", "exactly",
-  "perfect", "awesome", "fine", "done", "stop", "wait",
-  "go on", "go ahead", "continue", "please continue", "keep going",
-  "carry on", "move on", "move along", "next",
-  "tell me more", "more",
-  "really", "interesting", "wow", "huh", "hmm", "ah", "oh",
-  "i see", "makes sense", "noted", "understood", "agreed",
-  "let me think", "hold on", "one second", "one moment",
-]);
 
-// Compositional acks like "yes continue" / "no don't" / "ok go on" /
-// "alright tell me now". Strict exact-match misses these because of the
-// prefix word, but they are unambiguously acks/feedback against the
-// previous turn — current screen is irrelevant.
-const COMPOSITIONAL_ACK_RE =
-  /^(?:yes|yeah|yep|yup|no|nope|ok|okay|sure|alright|all\s+right|right|please|fine)[,.\s]+(?:continue|go\s+on|go\s+ahead|do\s+(?:it|that)|carry\s+on|keep\s+going|tell\s+me(?:\s+(?:now|more))?|move\s+on|don'?t|do\s+not|stop|next|please)\b/i;
+// Continuous screen observation cadence. When the user flips Samuel into
+// "continuous" mode via set_screen_observation, the hook polls the AX
+// tree every CONTINUOUS_POLL_MS and pushes a fresh screenshot + AX block
+// only when the screen has *materially* changed — both the hash differs
+// AND either the length delta exceeds CONTINUOUS_DELTA_BYTES or a
+// previously-unseen visible app/window appears. We deliberately do NOT
+// push on every hash diff (cursor blink / hover / scroll-by-1px), and
+// there is NO timed safety-tick: if nothing changed, we send nothing.
+//
+// Shipped values reflect bug postmortem 2026-05-14: 8s cadence + 60s
+// safety-tick + multi-app dump made each push ~110 KB and accumulated
+// ~1 MB of context in 2 minutes, eventually choking server-side VAD.
+const CONTINUOUS_POLL_MS = 15_000;
+const CONTINUOUS_MIN_PUSH_GAP_MS = 10_000;
+const CONTINUOUS_DELTA_BYTES = 200;
+// Pause continuous pushes after this much user silence — the user has
+// either walked away or switched contexts. Resume on the next real
+// user turn (transcribed audio, NOT echo / media noise).
+const CONTINUOUS_USER_IDLE_MS = 90_000;
+// AX payload truncation budget for continuous-mode pushes. ~16 KB ≈ 4 K
+// tokens — tighter than the on-demand read_app limit because we push
+// these repeatedly and each one stays in conversation context until
+// the next push deletes it.
+const CONTINUOUS_AX_BUDGET = 16_000;
 
-// Reactive feedback / corrections about the previous reply. The screen
-// hasn't changed; the user is just steering Samuel. Capturing fresh
-// context here is wasted, AND the new context can pull the model back
-// to the wrong answer (saw this in the log — repeated identical reply
-// after "don't make this kind of mistake again").
-const FEEDBACK_RE =
-  /^(?:no[,.\s]+(?:that(?:'|\u2019)?s|that\s+is|don'?t|do\s+not|stop)|don'?t\s+(?:make|repeat|say|do|tell|use)|stop\s+(?:repeating|saying|doing)|that(?:'|\u2019)?s\s+(?:wrong|incorrect|not\s+(?:right|correct))|you(?:'|\u2019)?re\s+wrong|wrong\s+answer|come\s+on)\b/i;
+// Hard stop phrases — short user utterances that mean "stop talking"
+// rather than "ack, keep going". The realtime model's barge-in
+// (interrupt_response: true) handles overlapping speech, but if the
+// user says one of these BEFORE Samuel finishes a thought (e.g. small
+// pause between sentences), barge-in alone won't fire. We catch the
+// transcript here, send response.cancel, and refuse to let the model
+// keep monologuing. This is the fix for the "Yes, I know. Stop." →
+// "Let me explain again from the top!" loop.
+const HARD_STOP_PATTERN =
+  /^(?:stop|wait|enough|i\s+know|i\s+got\s+it|i\s+understand|got\s+it[,.\s!]+(?:thanks|thank\s+you)?|shut\s+up|quiet|that(?:'|\u2019)?s\s+enough|please\s+stop|no\s+more|never\s+mind|nevermind)[.!?\s]*$/i;
 
-// Whisper-style transcription bias. HARD LIMIT 1024 chars enforced by the
-// Realtime API; if exceeded the whole session.update is rejected, which
-// silently strips `instructions` + `tools` from the session — Samuel comes
-// up as a generic assistant with no tools. Keep this terse, keyword-style.
-// Buckets in priority order:
-//   1) wake-word variants
-//   2) ambient-watcher controls (most-misheard phrases — "watch for",
-//      "trigger", "N2 level", "remind me less often")
-//   3) UI nouns the user actually says (page/video/tab/monitor — not
-//      "lane" or "meal")
-//   4) common app commands
-//   5) meta / takeover phrases
-//   6) language-study terms + Japanese code-switching
 // Whisper-style bias prompt for gpt-4o-transcribe. Per OpenAI speech-to-text
 // docs (https://developers.openai.com/api/docs/guides/speech-to-text#prompting):
-// the prompt biases the decoder TOWARD phrases that appear in it. So this
-// list must contain ONLY terms Whisper genuinely struggles with — proper
-// nouns, rare jargon, code-switched scripts. NEVER bait common English
-// commands or chitchat: a phrase like "just do it" in the prompt makes
-// "how are you doing" → "do it" plausible from a noisy/clipped clip.
+// the prompt biases the decoder TOWARD phrases that appear in it.
+//
+// SCOPE — narrow on purpose. This list must contain ONLY terms Whisper
+// genuinely struggles with: proper nouns, rare jargon, code-switched
+// scripts. NEVER seed common English verbs or chitchat — they pull
+// muddy audio toward the seeded token. Concrete failure: an earlier
+// version seeded "batch / alert me / remind me / cooldown / debounce"
+// to help with watcher commands. Result: "translate the second sentence"
+// got transcribed as "Batch the alerts" on noisy audio because every
+// watcher verb in the prompt slightly elevated those token logits.
+//
+// The realtime model (gpt-realtime-2) understands raw audio directly
+// and never sees this string. This prompt only affects the side-channel
+// transcript shown in chat UI / logs and consumed by the wake-phrase
+// detector ("Sammy"). HARD_STOP, ECHO_PHRASES, media-noise, and saydo
+// guards do not depend on this prompt.
+//
+// Allowed buckets:
+//   1) Wake-word variants — "Sammy" is genuinely mistranscribed
+//      ("Sam, he" / "salmon"); the wake-phrase detector reads this
+//      transcript so the seed is load-bearing for that detector.
+//   2) Language-study domain terms (JLPT levels, romaji, hiragana,
+//      katakana, kanji, pitch accent) — these appear in the chat
+//      panel and logs; Whisper otherwise emits "JLPT and 5",
+//      "romanji", "pitch agent" etc. The realtime model itself
+//      hears the audio directly and does not depend on this seed.
+//   3) Latin-script anchor phrase (the leading sentence) to keep
+//      the decoder committed to English on sub-second clips — it
+//      falls back to random scripts otherwise (historically
+//      produced gibberish like 我們馬幾咩?).
+//
+// App names are NOT seeded here. The realtime model sees apps like
+// CapCut / WeChat / Chrome / Notes in its tool descriptions and emits
+// the correct argument string regardless of how the side-channel
+// transcript spells them. Seeding apps only earned cosmetic chat-UI
+// spelling, which isn't worth the prompt budget.
 //
 // HARD LIMIT 1024 chars enforced by the Realtime API; if exceeded, the
 // whole session.update is rejected and Samuel comes up as a generic
 // assistant with no tools.
 const TRANSCRIPTION_BIAS_PROMPT =
-  "Samuel — Mac voice assistant: desktop control, language study, ambient watchers. " +
-  "Wake: Samuel, Sam, Sammy. " +
-  "Watchers: watch for, watch out for, trigger, alert me, notify me, remind me, " +
-  "remind less often, batch, digest, once when, cooldown, debounce, classifier, " +
-  "stop watching, pause it, drop unused, " +
-  "JLPT N5 N4 N3 N2 N1 level vocabulary. " +
-  "UI: page, video, tab, window, monitor, screen, link, sidebar, browser, app. " +
-  "Apps: Gmail, Calendar, Cursor, Chrome, Notes, CapCut, Spotify, Finder, WeChat. " +
-  "Language: translate, explain grammar, romaji, hiragana, katakana, kanji, " +
-  "particle, conjugation, pitch accent. " +
-  "Code-switch: 'how do you say X in Japanese' (X = Japanese phrase from screen).";
+  "Samuel: Mac voice assistant for desktop control and language study. " +
+  "Wake words: Samuel, Sam, Sammy. " +
+  "Japanese study: JLPT N5 N4 N3 N2 N1, romaji, hiragana, katakana, kanji, " +
+  "pitch accent, particle, conjugation.";
 
 // Static guard — fail fast in dev so a future edit doesn't silently strip
 // the whole session config again. Realtime API ceiling is 1024.
@@ -295,84 +181,18 @@ function addressesSamuel(text: string): boolean {
   return WAKE_PATTERN.test(text);
 }
 
-function isConversationalAck(text: string): boolean {
-  if (!text) return false;
-  const normalized = text.toLowerCase().replace(/[.!?,'"…]/g, "").trim();
-  if (!normalized) return false;
-  // 1) Exact phrase match (single-word + canonical multi-word acks).
-  if (ACK_PHRASES.has(normalized)) return true;
-  // 2) Compositional acks ("yes continue", "ok go on", "no don't").
-  //    Bounded to short phrases (<=6 words) so genuinely-content-bearing
-  //    sentences like "no don't open the email yet" are still caught
-  //    later — those need a real answer, not just an ack.
-  const wordCount = normalized.split(/\s+/).length;
-  if (wordCount <= 6 && COMPOSITIONAL_ACK_RE.test(text)) return true;
-  // 3) Reactive feedback / correction of the previous reply. Screen is
-  //    not the source of new information here — the user is steering.
-  if (wordCount <= 12 && FEEDBACK_RE.test(text)) return true;
-  return false;
-}
-
-// Words that mean "talk about whatever is currently on my screen". If
-// any of these appear, we MUST capture fresh AX + screenshot — the
-// model needs current screen state to answer.
-const REFERENTIAL_PATTERN =
-  /\b(this|that|here|highlighted|selected|currently|on (?:the|my) screen|on (?:the|this) page|the (?:current|active) (?:tab|page|window))\b/i;
-
-// Verbs that imply the model will call tools to navigate/fetch fresh data.
-// For these, the auto-injected AX + screenshot is wasted ~1.3s of latency
-// because the model is going to grab fresh data via tools regardless.
+// Verbs that imply the user is asking Samuel to take an action / navigate.
+// Used by the passive-listening exit logic and the media-noise filter to
+// distinguish "user issued a command" from "transcriber drifted into
+// background dialogue".
 const COMMAND_VERB_PATTERN =
   /^(?:hey\s+(?:samuel|sammy|sam)[,.\s]+)?(?:can\s+you\s+|could\s+you\s+|please\s+|just\s+)?(?:play|open|launch|start|switch|navigate|go\s+to|find|search|pull\s+up|show\s+me|read\s+me|bring\s+up|check\s+(?:my|on)|tell\s+me\s+(?:about\s+)?(?:my|the\s+latest)|what(?:'?s| is)\s+(?:my|the)\s+(?:latest|new|next|most\s+recent))\b/i;
 
 // Specific apps/services the user might reference. Mentioning any of these
-// almost always means "use tools to access that app". Don't bother capturing
-// the current screen.
+// almost always means "user wants Samuel to act on that service" — used
+// as a wake-word equivalent for auto-passive exit.
 const SERVICE_PATTERN =
   /\b(gmail|email|inbox|youtube|spotify|doordash|uber\s*eats|amazon|github|calendar|wechat|telegram|slack|discord(?!\s+message)|reddit|twitter|linkedin|messages\s+app)\b/i;
-
-// Meta / self-referential / chitchat questions where the user's screen has
-// nothing to do with the answer. Capturing AX + screenshot here is pure
-// waste — ~1.3s of latency, ~150 KB of tokens, and a JPEG retry-loop just
-// so the model can answer "I can do X, Y, Z" or "I'm doing well, sir."
-//
-// Conservative on purpose: only matches phrases that are obviously about
-// Samuel himself, generic greetings, or ask-the-AI-for-content prompts.
-// False positives here just answer without screen context — fine for these.
-const META_QUESTION_PATTERN =
-  /\b(?:what\s+(?:else\s+)?can\s+you\s+do|what(?:'?s| is| are)\s+your\s+(?:capabilit|featur|abilit|power|skill|tool|function|name|favorite)|what\s+do\s+you\s+do|how\s+do\s+you\s+work|who\s+(?:are|made)\s+you|what\s+are\s+you|tell\s+me\s+about\s+yourself|are\s+you\s+(?:an?\s+)?(?:ai|robot|human|real|there)|how\s+are\s+you(?:\s+doing)?|how(?:'?s| is)\s+it\s+going|how(?:'?s| is)\s+(?:your|things)|what(?:'?s| is)\s+up|good\s+(?:morning|afternoon|evening|night)|say\s+(?:hi|hello|something)|tell\s+me\s+a\s+(?:joke|story|fact)|sing\s+(?:me\s+)?a\s+song)\b/i;
-
-/**
- * Decide whether to skip auto-injected AX + screenshot context for a turn.
- * Skipping saves ~1.3s of capture/encode/inject latency before the model
- * can begin speaking — important for command-intent utterances where the
- * model will use tools to fetch fresh data anyway. Always errs toward
- * keeping context (false → capture) when ambiguous.
- *
- * Priority: META > SERVICE > REFERENTIAL > COMMAND.
- *   - META questions ("what can you do", "how are you", "tell me a joke")
- *     are about Samuel himself or general chitchat — screen is irrelevant.
- *   - SERVICE always wins because mentioning Gmail/YouTube/etc means the
- *     model will navigate to that service via tools regardless of what's
- *     currently on screen. ("click on that YouTube tab" → list_browser_tabs)
- *   - REFERENTIAL ("translate this", "what does that say") keeps context
- *     because the user is pointing at the current screen.
- *   - COMMAND verbs (play/open/find/...) without a service skip — model
- *     will fetch fresh data via tools.
- */
-function shouldSkipAutoContext(transcript: string): boolean {
-  if (!transcript) return false;
-  // META: "what can you do", "how are you", "tell me a joke" — pure
-  // chitchat / self-referential questions. Current screen adds no value.
-  if (META_QUESTION_PATTERN.test(transcript)) return true;
-  // SERVICE mention — model will use tools to access that service.
-  if (SERVICE_PATTERN.test(transcript)) return true;
-  // COMMAND + referential ("translate this email" with no service) → keep
-  // context because the user is pointing at the current screen.
-  if (REFERENTIAL_PATTERN.test(transcript)) return false;
-  if (COMMAND_VERB_PATTERN.test(transcript.trim())) return true;
-  return false;
-}
 
 // Common English function words used to sanity-check that a transcript is
 // actually English (not romanized foreign-language bleed from media).
@@ -416,7 +236,17 @@ function looksLikeMediaNoise(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
 
-  // Language-learning mode legitimately wants foreign audio; skip filter.
+  // Whisper / gpt-4o-transcribe hallucination signature: when the model
+  // interprets audio as "quoted dialogue" (someone reading text aloud,
+  // fuzzy non-speech segments, or media bleed it can't classify), it
+  // returns the text wrapped in literal quotation marks. Real users
+  // don't speak text wrapped in quotes. Drop these regardless of
+  // learning mode — they ARE the false positives learning mode lets
+  // through. Both straight (") and curly (" ") quotes count.
+  if (/^["\u201C\u201D].+["\u201C\u201D][.!?]?$/.test(trimmed)) return true;
+
+  // Language-learning mode legitimately wants foreign audio; skip the
+  // remaining heuristics (which would over-drop legitimate vocab queries).
   try {
     if (typeof localStorage !== "undefined" && localStorage.getItem("samuel-learning-language")) {
       return false;
@@ -470,6 +300,16 @@ const SAYDO_ACTION_RE =
 // response.create that re-runs the prior wrong answer (#repeated).
 const SAYDO_MEMORY_ACK_RE =
   /\b(?:i(?:'|\u2019)ll\s+(?:remember|keep\s+(?:that|this)\s+in\s+mind|make\s+a\s+(?:mental\s+)?note|try|be\s+(?:more\s+)?careful|avoid|stop)|noted(?:,?\s+sir)?|understood(?:,?\s+sir)?|got\s+it|i\s+see|apologies|sorry|my\s+(?:mistake|apologies))\b/i;
+// Past-tense / present-continuous SELF-RECAP — the model is describing
+// what it already did or is currently in the middle of doing for THIS
+// turn ("I was checking the screen", "I just read the focused app",
+// "I'm describing what I saw"). Followed by a purpose clause ("to
+// answer", "so I can report"). These are valid replies to "what are you
+// doing?" / "what just happened?" and require no fresh tool call —
+// firing saydo here only loops the model into re-running its prior
+// (already wrong) behavior.
+const SAYDO_RECAP_RE =
+  /\b(?:i\s+was\s+(?:checking|reading|looking|inspecting|opening|fetching|searching|describing|explaining|reporting)|i\s+(?:just\s+)?(?:read|checked|opened|fetched|searched|inspected|looked\s+at)|i(?:'|\u2019)m\s+(?:describing|explaining|reporting|telling|showing|inspecting)|i(?:'|\u2019)m\s+not\s+(?:starting|trying)|to\s+(?:answer|ground|confirm|address|clarify)\s+your)\b/i;
 // Phrases that frame what follows as descriptive analysis, not a future
 // action. "Save" matched too aggressively on "saves time" / "savings" —
 // hence dropped from SAYDO_ACTION_RE entirely; "remember" stays out for
@@ -482,6 +322,9 @@ function looksLikeUnactedCommitment(text: string): boolean {
   // Memory/feedback acks are NOT action commitments — they finish the
   // turn correctly with zero tool calls.
   if (SAYDO_MEMORY_ACK_RE.test(stripped)) return false;
+  // Self-recap explaining what just happened — also not a fresh
+  // commitment. Without this, "what are you doing?" answers loop.
+  if (SAYDO_RECAP_RE.test(stripped)) return false;
   return SAYDO_COMMIT_RE.test(stripped) && SAYDO_ACTION_RE.test(stripped);
 }
 
@@ -599,6 +442,22 @@ export function useRealtime(): UseRealtimeReturn {
   // Streaming assistant buffer
   const assistantBufferRef = useRef("");
   const assistantEntryIdRef = useRef<string | null>(null);
+  // Bubble pacer: text deltas from gpt-realtime arrive at *generation* speed
+  // (very fast), but the audio stream plays at *speech* speed (~15 chars/sec
+  // for English, slower for languages with longer syllables). Painting the
+  // full text immediately makes the chat bubble race ahead of Samuel's
+  // voice — the user reads the punchline before he says it. We instead
+  // accumulate deltas in `assistantBufferRef` and reveal them into the
+  // visible bubble at a rate matched to TTS playback. On audio_stopped or
+  // *_transcript.done we flush the remainder so the bubble never lags
+  // behind a finished utterance.
+  const assistantRevealedLenRef = useRef(0);
+  const assistantRevealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // ~16 chars/sec is a typical conversational TTS rate for English realtime
+  // voices; CJK transcript characters carry more information per glyph and
+  // tolerate a slower reveal, but a single rate is a reasonable approximation.
+  const REVEAL_CHARS_PER_SEC = 16;
+  const REVEAL_TICK_MS = 60;
 
   // Placeholder entry for the user's speech (inserted early so ordering is correct)
   const userPendingIdRef = useRef<string | null>(null);
@@ -618,31 +477,41 @@ export function useRealtime(): UseRealtimeReturn {
   // any VAD trigger immediately after it is guaranteed to be echo, not user speech.
   const agentResponseCountRef = useRef(0);
 
-  // Rate-limit auto-screen injections to prevent flooding the session with images.
-  const lastAutoScreenRef = useRef(0);
-  // Track the last auto-screen item ID so we can delete stale screenshots.
-  // Only ONE screenshot should exist in context at a time (prevents "this" confusion).
+  // Track the last continuous-mode screenshot item ID so we can delete
+  // stale screenshots when a fresh one arrives. Only ONE screenshot
+  // should exist in continuous-mode context at a time (prevents "this"
+  // confusion).
   const lastScreenItemIdRef = useRef<string | null>(null);
-  // Hash of the last AX text we injected. We skip re-injection when the
-  // screen hasn't materially changed — the model already has it.
-  const lastAxHashRef = useRef<string>("");
-  // Wallclock of the last successful context inject. When AX is unchanged
-  // AND the previous inject is still recent, we skip re-injection entirely
-  // (saves ~1.3s of capture+upload latency every turn). The screenshot is
-  // still in conversation history; the model can reference it.
-  const lastInjectAtRef = useRef<number>(0);
 
-  // Deferred-context state: speech_stopped sets this up but waits for the
-  // transcript before deciding whether to capture+inject screen data.
-  // - pendingTurnRef.current is true between speech_stopped and the decision
-  //   (transcript completed OR fallback timeout).
-  // - pendingTurnTimerRef fires the fallback if transcription is silent.
-  const pendingTurnRef = useRef(false);
-  const pendingTurnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Forward declaration; the actual function is defined inside the session
-  // setup closure (it needs access to sessionRef, etc.). We assign through
-  // this ref so the speech_stopped fallback timer can call it.
-  const decideAndRespondRef = useRef<((transcript: string) => void) | null>(null);
+  // ── Screen observation mode (OpenAI lazy-context-fetching pattern) ──
+  // Default per session: "on_demand" — Samuel pulls screen context via
+  // tools when he needs it, NOT pushed eagerly on every turn. The user
+  // can flip this to "continuous" via the set_screen_observation tool
+  // ("Samuel, watch what I'm reading"). Mode resets to "on_demand" on
+  // every fresh session (Option A) — there's no cross-session persistence.
+  const screenObservationModeRef = useRef<ScreenObservationMode>("on_demand");
+  // App-scope filter for continuous mode. When set, the tick only reads
+  // this single app (~75% smaller payload than the all-visible-apps
+  // multi-dump). null → multi-app dump (only when user explicitly asks
+  // for cross-app monitoring).
+  const screenObservationAppRef = useRef<string | null>(null);
+  const screenObservationTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Hash + length of the last AX text we pushed in continuous mode.
+  // We require BOTH hash to differ AND length-delta to exceed
+  // CONTINUOUS_DELTA_BYTES before pushing — protects against
+  // sub-pixel/hover/cursor diffs from spamming the session.
+  const lastContinuousAxHashRef = useRef<string>("");
+  const lastContinuousAxLengthRef = useRef<number>(0);
+  // Wallclock of the last continuous-mode push (for the min-push-gap
+  // throttle) and the last real user turn (for the idle self-pause).
+  const lastContinuousPushAtRef = useRef<number>(0);
+  const lastUserSpeechAtRef = useRef<number>(0);
+
+  // Monotonic turn counter — bumped on every speech_started. Currently
+  // only used as a defensive guard for any future async per-turn callbacks
+  // (e.g. continuous-mode screen capture in flight when a new utterance
+  // begins). Cheap to keep around.
+  const turnIdRef = useRef(0);
 
   // Passive-listening mode: when true, Samuel ignores VAD-triggered turns
   // unless the transcript explicitly addresses him by name. The user toggles
@@ -670,8 +539,18 @@ export function useRealtime(): UseRealtimeReturn {
   // MEDIA_NOISE_PASSIVE_THRESHOLD we auto-arm passive listening so background
   // video / TV doesn't keep eating the mic and freezing the UI on "thinking".
   // Any clean transcript resets the counter.
+  //
+  // Threshold must be high enough that two unlucky bleeds from background
+  // video don't silence Samuel for a user actively asking for help. Anime /
+  // foreign-language audio can produce two non-Latin transcripts within
+  // seconds of each other; raising to 4 means the user has to be in a
+  // sustained noisy environment before we switch modes. The streak also
+  // decays after MEDIA_NOISE_DECAY_MS of real time so an old drop can't
+  // combine with a fresh one to silently push us past the threshold.
   const mediaNoiseStreakRef = useRef(0);
-  const MEDIA_NOISE_PASSIVE_THRESHOLD = 2;
+  const lastMediaNoiseAtRef = useRef(0);
+  const MEDIA_NOISE_PASSIVE_THRESHOLD = 4;
+  const MEDIA_NOISE_DECAY_MS = 30_000;
   // Say-do guard: true once we've nudged Samuel for a commitment-without-
   // tool-call this user-turn. Reset on the next speech_stopped so the
   // nudge fires at most once per turn (no infinite re-prompt loop).
@@ -907,10 +786,20 @@ export function useRealtime(): UseRealtimeReturn {
               threshold: 0.6,
               prefixPaddingMs: 400,
               silenceDurationMs: 700,
-              // CRITICAL: do NOT auto-respond on speech_stopped.
-              // We manually trigger response.create AFTER injecting AX tree + screenshot,
-              // so the model has full context before generating its reply.
-              create_response: false,
+              // Auto-respond at speech_stopped (OpenAI canonical pattern).
+              // The model decides whether it needs the screen and calls
+              // observe_screen / read_app / list_browser_tabs as tools,
+              // speaking a brief preamble in parallel to mask tool latency.
+              // We no longer pre-inject AX + screenshot — that path added
+              // 1-1.5s to every turn and required dozens of fragile
+              // English-only heuristics (ACK / META / SERVICE / COMMAND
+              // patterns) to skip the latency penalty for short turns. See
+              // OpenAI's realtime-models-prompting guide and the WebRTC
+              // low-latency post for the architectural rationale.
+              create_response: true,
+              // Barge-in: when the user speaks while Samuel is talking,
+              // cancel his in-flight response immediately.
+              interrupt_response: true,
             },
           },
           output: {
@@ -929,8 +818,10 @@ export function useRealtime(): UseRealtimeReturn {
       }
     });
 
-    // Register passive-listening toggle. When passive=true, decideAndRespond
-    // drops VAD-triggered turns that don't address Samuel by name.
+    // Register passive-listening toggle. When passive=true, the transcript
+    // handler cancels VAD-triggered auto-responses unless the user
+    // addresses Samuel by name (or, in auto-passive, gives a clear
+    // command/service intent).
     registerSetPassiveListening((passive: boolean) => {
       passiveListeningRef.current = passive;
       // Explicit toggle wins — clear the auto-passive flag either way so
@@ -939,6 +830,199 @@ export function useRealtime(): UseRealtimeReturn {
       autoPassiveRef.current = false;
       clearInactivityTimer();
       debugLog("listening-mode", passive ? "PASSIVE (manual) — ignore mic until addressed" : "NORMAL — auto-respond to clear speech");
+    });
+
+    // ── Continuous screen observation (opt-in, off by default) ──────
+    // Cheap djb2 hash for content-change detection.
+    const cheapHash = (s: string): string => {
+      let h = 5381;
+      for (let i = 0; i < s.length; i++) {
+        h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+      }
+      return h.toString(36);
+    };
+
+    // One tick of the continuous-mode pump. Tightly throttled — see
+    // CONTINUOUS_* constants near the top of this module for the
+    // rationale (postmortem: too-eager pushes choked server-side VAD).
+    const continuousScreenTick = async () => {
+      if (screenObservationModeRef.current !== "continuous") return;
+      const s = sessionRef.current;
+      if (!s) return;
+
+      const now = Date.now();
+
+      // Self-pause when the user has been silent for too long. We don't
+      // tear down the timer (so the next user turn resumes immediately
+      // without re-starting state), we just skip pushes until activity.
+      if (
+        lastUserSpeechAtRef.current > 0 &&
+        now - lastUserSpeechAtRef.current >= CONTINUOUS_USER_IDLE_MS
+      ) {
+        return;
+      }
+
+      // Hard throttle — never more than one push per CONTINUOUS_MIN_PUSH_GAP_MS,
+      // even if the screen is changing rapidly.
+      if (
+        lastContinuousPushAtRef.current > 0 &&
+        now - lastContinuousPushAtRef.current < CONTINUOUS_MIN_PUSH_GAP_MS
+      ) {
+        return;
+      }
+
+      try {
+        // Scope the AX read to the user-named app when available — much
+        // cheaper than the multi-app dump. Falls back to multi only when
+        // the user explicitly asked for cross-app monitoring.
+        const scopedApp = screenObservationAppRef.current;
+        const axText = await invoke<string>(
+          "read_app_content",
+          scopedApp
+            ? { appName: scopedApp, multi: false }
+            : { appName: null, multi: true },
+        ).catch(() => "");
+        const fullAx = axText ?? "";
+        const axHash = fullAx ? cheapHash(fullAx) : "";
+
+        // Push only when content changed AND the change is meaningful.
+        // Hash diff alone fires on cursor blink / sub-pixel re-renders;
+        // requiring a length delta filters those out. First-push and
+        // any change at all when length was zero are also valid.
+        const hashChanged = !!axHash && axHash !== lastContinuousAxHashRef.current;
+        const lengthDelta = Math.abs(fullAx.length - lastContinuousAxLengthRef.current);
+        const isFirstPush = lastContinuousPushAtRef.current === 0;
+        const meaningfulChange =
+          hashChanged && (isFirstPush || lengthDelta >= CONTINUOUS_DELTA_BYTES);
+        if (!meaningfulChange) return;
+
+        const shot = await invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
+          .catch(() => null);
+        if (!fullAx && !shot?.base64) return;
+
+        // Drop the previous screen item so only one continuous-mode
+        // screenshot exists at any time.
+        if (lastScreenItemIdRef.current) {
+          try {
+            s.transport.sendEvent({
+              type: "conversation.item.delete",
+              item_id: lastScreenItemIdRef.current,
+            });
+          } catch { /* may already be gone */ }
+        }
+
+        const truncatedAx = fullAx.length > CONTINUOUS_AX_BUDGET
+          ? fullAx.slice(0, CONTINUOUS_AX_BUDGET) + "\n...(truncated)"
+          : fullAx;
+        const itemId = `ctx_${now}`;
+        const scopeLabel = scopedApp ?? "all visible apps";
+        const content: Array<Record<string, string>> = [];
+        if (truncatedAx && truncatedAx.trim().length > 20) {
+          content.push({
+            type: "input_text",
+            text:
+              `[System: Background screen update — Samuel is in continuous observation mode (` +
+              `scope: ${scopeLabel}). This is silent context; do NOT proactively speak about ` +
+              `it unless the user asks or a registered watcher trigger fires. Current screen ` +
+              `content (Accessibility Tree, exact text):\n${truncatedAx}]`,
+          });
+        }
+        if (shot?.base64) {
+          content.push({
+            type: "input_image",
+            image_url: `data:image/jpeg;base64,${shot.base64}`,
+          });
+        }
+        if (content.length === 0) return;
+        try {
+          // role: "system" (not "user") so these silent updates don't
+          // masquerade as user turns. role:"user" was confusing the
+          // server-side turn boundary detector and contributed to the
+          // VAD-stall postmortem on 2026-05-14.
+          s.transport.sendEvent({
+            type: "conversation.item.create",
+            item: { id: itemId, type: "message", role: "system", content },
+          });
+          lastScreenItemIdRef.current = itemId;
+          lastContinuousAxHashRef.current = axHash;
+          lastContinuousAxLengthRef.current = fullAx.length;
+          lastContinuousPushAtRef.current = now;
+          debugLog(
+            "continuous-screen",
+            `pushed scope=${scopeLabel} AX(${fullAx.length} chars, sent=${truncatedAx.length}, dLen=${lengthDelta}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
+          );
+        } catch (e) {
+          debugLog("continuous-screen", `push failed: ${e}`, "warn");
+        }
+      } catch (e) {
+        debugLog("continuous-screen", `tick failed: ${e}`, "warn");
+      }
+    };
+
+    const stopContinuousObservation = () => {
+      if (screenObservationTimerRef.current) {
+        clearInterval(screenObservationTimerRef.current);
+        screenObservationTimerRef.current = null;
+      }
+    };
+
+    const startContinuousObservation = () => {
+      stopContinuousObservation();
+      // Seed lastUserSpeechAt to "now" so the user-idle self-pause
+      // doesn't fire immediately on a fresh continuous-mode start.
+      lastUserSpeechAtRef.current = Date.now();
+      // Fire one push immediately so Samuel sees the current screen the
+      // moment the user flips into continuous mode, then poll on cadence.
+      void continuousScreenTick();
+      screenObservationTimerRef.current = setInterval(
+        () => { void continuousScreenTick(); },
+        CONTINUOUS_POLL_MS,
+      );
+    };
+
+    // Register screen-observation mode bridge. Default per session is
+    // "on_demand" — the model uses tools (observe_screen / read_app /
+    // list_browser_tabs) to fetch screen context when it needs it, no
+    // ambient pushes. Switching to "continuous" starts the polling
+    // pump above; an optional `app` scope reads only that one app
+    // (much cheaper than the multi-app dump).
+    registerSetScreenObservation((mode, opts) => {
+      screenObservationModeRef.current = mode;
+      const reason = opts?.reason;
+      const app = opts?.app?.trim() || null;
+      if (mode === "continuous") {
+        // App switch mid-session: clear stale hash so the next tick
+        // pushes the new scope's content immediately.
+        if (app !== screenObservationAppRef.current) {
+          lastContinuousAxHashRef.current = "";
+          lastContinuousAxLengthRef.current = 0;
+          lastContinuousPushAtRef.current = 0;
+        }
+        screenObservationAppRef.current = app;
+        startContinuousObservation();
+        debugLog(
+          "screen-mode",
+          `CONTINUOUS — scope=${app ?? "all-visible-apps"} polling every ${CONTINUOUS_POLL_MS}ms${reason ? ` (reason: ${reason})` : ""}`,
+        );
+      } else {
+        stopContinuousObservation();
+        screenObservationAppRef.current = null;
+        // Drop any existing continuous-mode screenshot so a future
+        // tool-driven screenshot doesn't conflict with stale ambient state.
+        if (lastScreenItemIdRef.current) {
+          try {
+            sessionRef.current?.transport.sendEvent({
+              type: "conversation.item.delete",
+              item_id: lastScreenItemIdRef.current,
+            });
+          } catch { /* may already be gone */ }
+          lastScreenItemIdRef.current = null;
+          lastContinuousAxHashRef.current = "";
+          lastContinuousAxLengthRef.current = 0;
+          lastContinuousPushAtRef.current = 0;
+        }
+        debugLog("screen-mode", `ON_DEMAND — model fetches screen via tools${reason ? ` (reason: ${reason})` : ""}`);
+      }
     });
 
     // Register discard-last-turn handler. The user said something like
@@ -1060,14 +1144,12 @@ export function useRealtime(): UseRealtimeReturn {
         ? (resultStr.length > previewLen ? resultStr.slice(0, previewLen) + `...(+${resultStr.length - previewLen} more)` : resultStr)
         : "(empty)";
       debugLog("tool-call", `END   ${toolName} (${resultStr.length} chars) result=${preview}`);
-      // Publish the latest tool result so the no-hallucination guardrail can
-      // verify Samuel's spoken claims against actual content.
-      updateLatestToolResult({ name: toolName, text: resultStr, ts: Date.now() });
 
-      // Tools that read or mutate screen state make the auto-injected context
-      // stale (e.g. AX captured Chrome on Discord; switch_browser_tab moves
-      // to DoorDash; the model then conflates the two and says "no DoorDash
-      // tab found"). Drop the stale context — the tool result IS the truth.
+      // Tools that read or mutate screen state make any prior
+      // continuous-mode screenshot stale (e.g. continuous-mode pushed
+      // Chrome on Discord; switch_browser_tab moves to DoorDash; the
+      // model then conflates the two and says "no DoorDash tab found").
+      // Drop the stale screenshot — the tool result IS the truth.
       const stateChangingTools = new Set([
         "read_app",
         "switch_browser_tab",
@@ -1082,11 +1164,9 @@ export function useRealtime(): UseRealtimeReturn {
             type: "conversation.item.delete",
             item_id: staleId,
           });
-          debugLog("ctx", `deleted stale auto-context after ${toolName} (item=${staleId})`);
+          debugLog("ctx", `deleted stale continuous-mode screen (item=${staleId} after ${toolName})`);
         } catch { /* may already be gone */ }
         lastScreenItemIdRef.current = null;
-        lastAxHashRef.current = "";
-        lastInjectAtRef.current = 0;
       }
 
       // Auto-Reflexion: turn structural tool failures into a persisted lesson
@@ -1219,196 +1299,93 @@ export function useRealtime(): UseRealtimeReturn {
     // so the next wake word triggers a fresh reconnect.
     // Handled via transport wildcard events ("session.closed" / "close").
 
-    // ── Smart context-injection decision ──────────────────────────────────
-    // Called ONCE per turn after we know the transcript (or fallback timeout).
-    // Decides whether to refresh AX/screenshot context based on:
-    //   1. Was it a conversational ack? ("sounds good", "ok", "thanks") → skip
-    //   2. Has the screen materially changed since last injection? → skip if not
-    //   3. Are we still in cooldown / pre-greeting? → skip
-    // Always triggers response.create at the end so the model replies.
-    const decideAndRespond = (transcript: string) => {
-      // Cheap djb2 hash — used to detect whether AX content changed materially.
-      const cheapHash = (s: string): string => {
-        let h = 5381;
-        for (let i = 0; i < s.length; i++) {
-          h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-        }
-        return h.toString(36);
-      };
-
-      const triggerResponse = () => {
-        try {
-          sessionRef.current?.transport.sendEvent({ type: "response.create" });
-          debugLog("turn", "response.create triggered");
-        } catch (e) {
-          debugLog("turn", `response.create failed: ${e}`, "warn");
-        }
-      };
-
-      const now = Date.now();
-      const elapsed = now - lastAutoScreenRef.current;
-      const pastGreeting = agentResponseCountRef.current >= 1;
-
-      // Reason 0 (highest priority): passive listening — user told Samuel
-      // "that's the video, not me", or the auto-arm timer engaged after
-      // post-response idle. Drop the turn unless they explicitly address
-      // him. The audio is still committed to conversation history, so when
-      // they DO address him later, he can reference what was said.
+    // ── Post-trigger transcript guard ─────────────────────────────────────
+    // The session's server VAD now auto-responds at speech_stopped (see
+    // session.config.audio.input.turnDetection.create_response above), so
+    // by the time the transcript arrives the model is already speaking.
+    // If the transcript reveals the audio was bogus (echo, media bleed,
+    // passive-listening with no wake word), we cancel the in-flight
+    // response via session.interrupt(). Otherwise we let it run.
+    //
+    // Returns true if the auto-response should be cancelled, false to let
+    // it proceed.
+    const shouldCancelAutoResponse = (transcript: string): { cancel: boolean; reason?: string } => {
+      // Passive listening: drop turns that don't address Samuel (manual
+      // passive) or aren't a clear command/service mention (auto-passive).
       if (passiveListeningRef.current && transcript) {
-        if (!addressesSamuel(transcript)) {
-          debugLog(
-            "listening-mode",
-            `${autoPassiveRef.current ? "auto-passive" : "passive"}: dropping "${transcript}" (no wake phrase)`,
-          );
-          return;
+        const wakeMatched = addressesSamuel(transcript);
+        const trimmed = transcript.trim();
+        const commandIntent = autoPassiveRef.current
+          && (COMMAND_VERB_PATTERN.test(trimmed) || SERVICE_PATTERN.test(trimmed));
+        if (!wakeMatched && !commandIntent) {
+          return {
+            cancel: true,
+            reason: `${autoPassiveRef.current ? "auto-passive" : "passive"}: no wake/command in "${transcript}"`,
+          };
         }
-        // Wake word present — auto-disengage if it was the timer that
-        // armed passive. Manual passive (user said "go quiet") stays on
-        // until the user turns it off explicitly.
+        // Auto-disengage if it was the timer that armed passive.
         if (autoPassiveRef.current) {
           passiveListeningRef.current = false;
           autoPassiveRef.current = false;
-          debugLog("listening-mode", `wake word in "${transcript}" — exiting auto-passive`);
-        }
-      }
-
-      // Reason 1: conversational ack — model has prior context, just respond
-      if (transcript && isConversationalAck(transcript)) {
-        debugLog("turn", `ack detected ("${transcript}") — skipping context refresh`);
-        triggerResponse();
-        return;
-      }
-
-      // Reason 1b: meta-question or command-intent — screen capture adds
-      // no value. Skipping the AX read + screenshot trims ~1-1.5s before
-      // the model starts speaking. Examples that skip:
-      //   META:    "what else can you do" / "how are you" / "tell me a joke"
-      //   SERVICE: "play music on YouTube" / "check my DoorDash order"
-      //   COMMAND: "open Mail" / "find that email"
-      // Falls back to capture if the user uses referential words ("this",
-      // "that", "highlighted", etc.) — those genuinely need current screen.
-      if (transcript && shouldSkipAutoContext(transcript)) {
-        debugLog("turn", `no-context-needed ("${transcript}") — skipping AX+screenshot`);
-        triggerResponse();
-        return;
-      }
-
-      // Reason 2: still in pre-greeting or recent cooldown
-      if (!pastGreeting || elapsed < AUTO_SCREEN_COOLDOWN_MS) {
-        debugLog("turn", `skipping context inject (pastGreeting=${pastGreeting}, elapsed=${elapsed}ms)`);
-        triggerResponse();
-        return;
-      }
-
-      lastAutoScreenRef.current = now;
-
-      const axPromise = invoke<string>("read_app_content", { appName: null, multi: true })
-        .catch((e) => { debugLog("ctx", `AX read failed: ${e}`, "warn"); return ""; });
-      const shotPromise = invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
-        .catch((e) => { debugLog("ctx", `screenshot failed: ${e}`, "warn"); return null; });
-
-      Promise.all([axPromise, shotPromise]).then(([axText, shot]) => {
-        if (!sessionRef.current) return;
-
-        // Hash the FULL AX payload, not just the prefix. The first 6KB of
-        // a Chrome window is mostly toolbar / sidebar / tabs and rarely
-        // changes; hashing only the prefix would hide real article-content
-        // changes and falsely report "unchanged".
-        const fullAx = axText ?? "";
-        const axHash = fullAx ? cheapHash(fullAx) : "";
-        const axChanged = !!axHash && axHash !== lastAxHashRef.current;
-
-        // Truncate AFTER hashing so the model sees more actual content.
-        // 24KB ≈ 6K tokens, well within Realtime context budget. The old
-        // 6KB ceiling never let the article body through — the model was
-        // reduced to OCR'ing the JPEG, which produced wrong-paragraph
-        // hallucinations on long pages.
-        const AX_INJECT_BUDGET = 24_000;
-        const truncated = fullAx.length > AX_INJECT_BUDGET
-          ? fullAx.slice(0, AX_INJECT_BUDGET) + "\n...(truncated)"
-          : fullAx;
-
-        // Reason 3a: AX is byte-identical to the last inject AND we injected
-        // recently. Even if a screenshot is available, sending it again is
-        // pure waste — the prior screenshot+AX is still in conversation
-        // history and the model can reference it. Saves ~1.3s + ~150KB.
-        const sinceLastInject = lastInjectAtRef.current === 0
-          ? Number.POSITIVE_INFINITY
-          : now - lastInjectAtRef.current;
-        if (
-          !axChanged &&
-          lastScreenItemIdRef.current &&
-          sinceLastInject < CTX_DEDUP_WINDOW_MS
-        ) {
+          mediaNoiseStreakRef.current = 0;
+          lastMediaNoiseAtRef.current = 0;
           debugLog(
-            "ctx",
-            `screen unchanged + recent inject (${Math.round(sinceLastInject)}ms ago) — skipping`,
+            "listening-mode",
+            `${wakeMatched ? "wake word" : "command-verb intent"} in "${transcript}" — exiting auto-passive`,
           );
-          triggerResponse();
-          return;
         }
-
-        // Reason 3b: nothing on screen at all (no AX, no screenshot)
-        if (!axChanged && !shot?.base64) {
-          debugLog("ctx", `screen unchanged (hash=${axHash}) — skipping inject`);
-          triggerResponse();
-          return;
-        }
-
-        // Delete previous context (single-image rule)
-        if (lastScreenItemIdRef.current) {
-          try {
-            sessionRef.current.transport.sendEvent({
-              type: "conversation.item.delete",
-              item_id: lastScreenItemIdRef.current,
-            });
-          } catch { /* may already be gone */ }
-        }
-
-        const itemId = `ctx_${now}`;
-        const content: Array<Record<string, string>> = [];
-
-        if (truncated && truncated.trim().length > 20) {
-          content.push({
-            type: "input_text",
-            text: `[Screen content from all visible apps (Accessibility Tree — exact text):\n${truncated}]`,
-          });
-        }
-
-        if (shot?.base64) {
-          content.push({
-            type: "input_image",
-            image_url: `data:image/jpeg;base64,${shot.base64}`,
-          });
-        }
-
-        if (content.length > 0) {
-          try {
-            sessionRef.current.transport.sendEvent({
-              type: "conversation.item.create",
-              item: { id: itemId, type: "message", role: "user", content },
-            });
-            lastScreenItemIdRef.current = itemId;
-            lastAxHashRef.current = axHash;
-            lastInjectAtRef.current = now;
-            debugLog(
-              "ctx",
-              `injected AX(${axText?.length ?? 0} chars, sent=${truncated.length}, changed=${axChanged}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
-            );
-          } catch (e) {
-            debugLog("ctx", `inject failed: ${e}`, "warn");
-          }
-        } else {
-          debugLog("ctx", "both AX and screenshot empty — no context injected", "warn");
-        }
-
-        triggerResponse();
-      }).catch((e) => {
-        debugLog("ctx", `context promise failed: ${e}`, "warn");
-        triggerResponse();
-      });
+      }
+      return { cancel: false };
     };
-    decideAndRespondRef.current = decideAndRespond;
+
+
+    // ── Bubble pacer helpers ─────────────────────────────────────────
+    // Paint whatever portion of `assistantBufferRef.current` is currently
+    // "revealed" into the assistant chat entry. Called by the reveal timer
+    // and by flush-points (audio_transcript.done, response.done).
+    const paintRevealedAssistantText = () => {
+      const id = assistantEntryIdRef.current;
+      if (!id) return;
+      const text = assistantBufferRef.current.slice(0, assistantRevealedLenRef.current);
+      setTranscript((prev) =>
+        prev.map((e) => (e.id === id ? { ...e, text } : e)),
+      );
+    };
+
+    const stopRevealTimer = () => {
+      if (assistantRevealTimerRef.current) {
+        clearInterval(assistantRevealTimerRef.current);
+        assistantRevealTimerRef.current = null;
+      }
+    };
+
+    const startRevealTimer = () => {
+      if (assistantRevealTimerRef.current) return;
+      const charsPerTick = (REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000;
+      let acc = 0;
+      assistantRevealTimerRef.current = setInterval(() => {
+        const total = assistantBufferRef.current.length;
+        if (assistantRevealedLenRef.current >= total) return;
+        acc += charsPerTick;
+        if (acc < 1) return;
+        const step = Math.floor(acc);
+        acc -= step;
+        const next = Math.min(total, assistantRevealedLenRef.current + step);
+        if (next === assistantRevealedLenRef.current) return;
+        assistantRevealedLenRef.current = next;
+        paintRevealedAssistantText();
+      }, REVEAL_TICK_MS);
+    };
+
+    // Reveal everything immediately and stop the pacer (used on
+    // audio_transcript.done / response.done so the bubble matches the
+    // model's final text the moment audio finishes).
+    const flushRevealAssistantText = () => {
+      assistantRevealedLenRef.current = assistantBufferRef.current.length;
+      paintRevealedAssistantText();
+      stopRevealTimer();
+    };
+    // ─────────────────────────────────────────────────────────────────
 
     // Raw transport events for real-time transcript display
     session.transport.on("*", (event: Record<string, unknown>) => {
@@ -1417,6 +1394,10 @@ export function useRealtime(): UseRealtimeReturn {
       switch (type) {
         case "input_audio_buffer.speech_started": {
           debugLog("turn", "speech_started");
+          // Bump turn counter — any in-flight per-turn async work (e.g.
+          // continuous-mode screen capture) can use this to detect that
+          // a newer utterance has started and abandon stale work.
+          turnIdRef.current += 1;
           setAgentState("listening");
           // User is speaking — cancel any inactivity timer (keep conversation alive)
           clearInactivityTimer();
@@ -1457,22 +1438,14 @@ export function useRealtime(): UseRealtimeReturn {
             clearTimeout(saydoNudgeTimerRef.current);
             saydoNudgeTimerRef.current = null;
           }
-          debugLog("turn", "speech_stopped — waiting for transcript to decide on context");
-          // We DEFER the heavy AX read + screenshot until we know what the user
-          // actually said. Conversational acks like "sounds good" don't need a
-          // fresh screen capture; the prior turn's context is still available.
-          // The transcript event normally arrives within a few hundred ms.
-          // If it doesn't arrive within TRANSCRIPT_WAIT_MS, we fall back to
-          // capturing context anyway (treat as "real query").
-          pendingTurnRef.current = true;
-          if (pendingTurnTimerRef.current) clearTimeout(pendingTurnTimerRef.current);
-          pendingTurnTimerRef.current = setTimeout(() => {
-            if (pendingTurnRef.current) {
-              debugLog("turn", `no transcript after ${TRANSCRIPT_WAIT_MS}ms — capturing context anyway`);
-              pendingTurnRef.current = false;
-              decideAndRespondRef.current?.(""); // empty = treat as real query
-            }
-          }, TRANSCRIPT_WAIT_MS);
+          // Server VAD now auto-fires response.create at this point (see
+          // session.config.audio.input.turnDetection.create_response). The
+          // model decides whether it needs the screen and calls a tool;
+          // we no longer pre-inject AX + screenshot. If the transcript
+          // arrives and reveals echo / media bleed / passive-listening
+          // without a wake word, we cancel via session.interrupt() in the
+          // transcription.completed handler below.
+          debugLog("turn", "speech_stopped — auto-response triggered by server VAD");
           break;
 
         case "conversation.item.input_audio_transcription.completed": {
@@ -1515,15 +1488,16 @@ export function useRealtime(): UseRealtimeReturn {
             if (pendingId) {
               setTranscript((prev) => prev.filter((e) => e.id !== pendingId));
             }
-            // Cancel any pending turn so the fallback timer doesn't fire and
-            // we don't trigger a response for the dropped echo.
-            if (pendingTurnRef.current) {
-              pendingTurnRef.current = false;
-              if (pendingTurnTimerRef.current) {
-                clearTimeout(pendingTurnTimerRef.current);
-                pendingTurnTimerRef.current = null;
+            // Server VAD already fired response.create at speech_stopped.
+            // Cancel the in-flight auto-response so Samuel doesn't reply to
+            // the bogus turn (echo / media bleed / pure noise).
+            if (responseInProgressRef.current) {
+              try {
+                sessionRef.current?.interrupt();
+                debugLog("turn", "auto-response cancelled (echo/noise/media)");
+              } catch (e) {
+                debugLog("turn", `interrupt failed: ${e}`, "warn");
               }
-              debugLog("turn", "pending turn cancelled (echo/noise/media)");
             }
             // Crucial: speech_stopped flipped agentState → "thinking". Without
             // this, the UI stays stuck on "thinking" forever after a drop.
@@ -1532,14 +1506,25 @@ export function useRealtime(): UseRealtimeReturn {
             }
             // Auto-arm wake-word gate when media keeps interfering. Continuous
             // video/TV otherwise floods the mic with noise the user can't talk
-            // through. The next "Samuel" / "Sammy" addressing-phrase exits
-            // passive automatically (see auto-passive logic above).
+            // through. A clear command-verb (Reason 0 below) or any clean
+            // transcript exits auto-passive automatically.
             if (isMediaNoise) {
+              const now = Date.now();
+              // Decay the streak if too much real time has passed since the
+              // last drop — a bleed from minutes ago shouldn't combine with
+              // a fresh one to silently silence the assistant.
+              if (
+                lastMediaNoiseAtRef.current &&
+                now - lastMediaNoiseAtRef.current > MEDIA_NOISE_DECAY_MS
+              ) {
+                mediaNoiseStreakRef.current = 0;
+              }
               mediaNoiseStreakRef.current += 1;
+              lastMediaNoiseAtRef.current = now;
               if (mediaNoiseStreakRef.current >= MEDIA_NOISE_PASSIVE_THRESHOLD) {
                 armAutoPassive(
                   `${mediaNoiseStreakRef.current} media-noise drops`,
-                  "Background media detected \u2014 say \u201cSamuel\u201d to address me.",
+                  "Background media detected \u2014 say \u201cSamuel\u201d or use a clear command (\u201copen\u2026\u201d, \u201cexplain\u2026\u201d) to address me.",
                 );
               }
             }
@@ -1548,6 +1533,11 @@ export function useRealtime(): UseRealtimeReturn {
           // Clean transcript reaching this point — reset the media streak so
           // a single intervening user turn re-enables auto-listen behaviour.
           mediaNoiseStreakRef.current = 0;
+          lastMediaNoiseAtRef.current = 0;
+          // Stamp the user-activity wallclock so continuous-mode's
+          // self-pause clock resets. Echo / noise / media drops do NOT
+          // count as user activity.
+          lastUserSpeechAtRef.current = Date.now();
 
           recordTurn("user", text);
           if (pendingId) {
@@ -1558,15 +1548,45 @@ export function useRealtime(): UseRealtimeReturn {
             setTranscript((prev) => [...prev, makeEntry("user", text)]);
           }
 
-          // Now that we have a real transcript, decide whether to refresh
-          // screen context and trigger the response.
-          if (pendingTurnRef.current) {
-            pendingTurnRef.current = false;
-            if (pendingTurnTimerRef.current) {
-              clearTimeout(pendingTurnTimerRef.current);
-              pendingTurnTimerRef.current = null;
+          // Hard-stop phrases ("stop", "wait", "I know", "got it") need
+          // to actually halt Samuel — not give him another turn to keep
+          // explaining. server VAD's interrupt_response auto-cancels
+          // overlapping audio, but if the user speaks during a pause
+          // the model might already be between sentences (no audio to
+          // interrupt). We send response.cancel directly to be safe.
+          if (HARD_STOP_PATTERN.test(text.trim())) {
+            debugLog("turn", `hard-stop "${text}" — cancelling response`);
+            if (responseInProgressRef.current) {
+              try {
+                sessionRef.current?.interrupt();
+              } catch (e) {
+                debugLog("turn", `interrupt failed: ${e}`, "warn");
+              }
             }
-            decideAndRespondRef.current?.(text);
+            // No response — set state directly so UI doesn't stick on "thinking"
+            if (!responseInProgressRef.current) {
+              setAgentState("listening");
+            }
+            break;
+          }
+
+          // Real transcript — server VAD already triggered the response
+          // when speech_stopped fired. Check passive-listening here: if
+          // it's engaged and the user didn't address Samuel, cancel the
+          // in-flight auto-response.
+          const passiveDecision = shouldCancelAutoResponse(text);
+          if (passiveDecision.cancel) {
+            debugLog("listening-mode", `dropping turn — ${passiveDecision.reason}`);
+            if (responseInProgressRef.current) {
+              try {
+                sessionRef.current?.interrupt();
+              } catch (e) {
+                debugLog("turn", `interrupt failed: ${e}`, "warn");
+              }
+            }
+            if (!responseInProgressRef.current) {
+              setAgentState("listening");
+            }
           }
           break;
         }
@@ -1577,20 +1597,16 @@ export function useRealtime(): UseRealtimeReturn {
           if (delta) {
             setAgentState("speaking");
             assistantBufferRef.current += delta;
+            // Create the bubble entry on first delta. Start with an empty
+            // visible text and let the reveal timer fill it in at TTS rate
+            // so the bubble doesn't sprint ahead of Samuel's voice.
             if (!assistantEntryIdRef.current) {
-              const entry = makeEntry(
-                "assistant",
-                assistantBufferRef.current,
-              );
+              const entry = makeEntry("assistant", "");
               assistantEntryIdRef.current = entry.id;
+              assistantRevealedLenRef.current = 0;
               setTranscript((prev) => [...prev, entry]);
-            } else {
-              const id = assistantEntryIdRef.current;
-              const text = assistantBufferRef.current;
-              setTranscript((prev) =>
-                prev.map((e) => (e.id === id ? { ...e, text } : e)),
-              );
             }
+            startRevealTimer();
           }
           break;
         }
@@ -1604,17 +1620,19 @@ export function useRealtime(): UseRealtimeReturn {
             // Feed Samuel's spoken text to the self-voice filter so the
             // learning audio doesn't capture and re-process his own speech.
             invoke("record_samuel_speech", { text: finalText }).catch(() => {});
+            // Replace the buffer with the canonical final text (handles
+            // any small drift between accumulated deltas and the official
+            // transcript), then flush so the bubble shows the complete
+            // utterance at the moment audio finishes.
+            assistantBufferRef.current = finalText;
             if (assistantEntryIdRef.current) {
-              const id = assistantEntryIdRef.current;
-              setTranscript((prev) =>
-                prev.map((e) =>
-                  e.id === id ? { ...e, text: finalText } : e,
-                ),
-              );
+              flushRevealAssistantText();
             }
           }
+          stopRevealTimer();
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
+          assistantRevealedLenRef.current = 0;
           break;
         }
 
@@ -1635,9 +1653,22 @@ export function useRealtime(): UseRealtimeReturn {
 
           if (assistantBufferRef.current && assistantEntryIdRef.current) {
             lastAgentTextRef.current = assistantBufferRef.current;
+            // For cancelled responses (e.g. user interrupted Samuel mid-
+            // sentence) keep the bubble at whatever the user actually heard
+            // — flushing the unspoken tail would expose text the model
+            // generated past the audio cutoff. For all other terminal
+            // statuses, paint the full final text so the bubble matches
+            // the spoken utterance exactly.
+            if (respStatus === "cancelled") {
+              paintRevealedAssistantText();
+            } else {
+              flushRevealAssistantText();
+            }
           }
+          stopRevealTimer();
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
+          assistantRevealedLenRef.current = 0;
           agentResponseCountRef.current += 1;
           responseInProgressRef.current = false;
           setAgentState("listening");
@@ -1886,6 +1917,16 @@ export function useRealtime(): UseRealtimeReturn {
       registerReloadPlugins(null);
       registerDiscardLastTurn(null);
       registerInjectCorrection(null);
+      registerSetScreenObservation(null);
+      stopContinuousObservation();
+      // Reset to on_demand for the next session — Option A: continuous
+      // mode never persists across sessions.
+      screenObservationModeRef.current = "on_demand";
+      screenObservationAppRef.current = null;
+      lastContinuousAxHashRef.current = "";
+      lastContinuousAxLengthRef.current = 0;
+      lastContinuousPushAtRef.current = 0;
+      lastUserSpeechAtRef.current = 0;
       stopKeepalive();
       session.close();
       sessionRef.current = null;
@@ -1958,9 +1999,6 @@ export function useRealtime(): UseRealtimeReturn {
       isRotatingRef.current = false;
 
       agentResponseCountRef.current = 0;
-      // Suppress auto-screen for the first few seconds so the model can greet
-      // without being overwhelmed by an image on the very first speech_stopped.
-      lastAutoScreenRef.current = Date.now();
 
       if (isReconnect) {
         // Replay context via updateHistory so Samuel remembers the conversation.
@@ -2081,6 +2119,17 @@ export function useRealtime(): UseRealtimeReturn {
     contextRef.current = [];
     registerSendImage(null);
     registerScreenTarget(null);
+    registerSetScreenObservation(null);
+    if (screenObservationTimerRef.current) {
+      clearInterval(screenObservationTimerRef.current);
+      screenObservationTimerRef.current = null;
+    }
+    screenObservationModeRef.current = "on_demand";
+    screenObservationAppRef.current = null;
+    lastContinuousAxHashRef.current = "";
+    lastContinuousAxLengthRef.current = 0;
+    lastContinuousPushAtRef.current = 0;
+    lastUserSpeechAtRef.current = 0;
     sessionRef.current?.close();
     setStatus("disconnected");
     setAgentState("idle");
@@ -2199,8 +2248,9 @@ export function useRealtime(): UseRealtimeReturn {
 
   const sendText = useCallback((text: string) => {
     if (!text.trim()) return;
-    setTranscript((prev) => [...prev, makeEntry("user", text.trim())]);
-    recordTurn("user", text.trim());
+    const trimmed = text.trim();
+    setTranscript((prev) => [...prev, makeEntry("user", trimmed)]);
+    recordTurn("user", trimmed);
     if (!sessionRef.current) return;
     if (responseInProgressRef.current) {
       console.log("[session] skipping sendText — model is busy");
