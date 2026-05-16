@@ -896,12 +896,26 @@ export function useRealtime(): UseRealtimeReturn {
           hashChanged && (isFirstPush || lengthDelta >= CONTINUOUS_DELTA_BYTES);
         if (!meaningfulChange) return;
 
-        const shot = await invoke<{ base64: string; app_name: string; display_context?: string }>("capture_screen_now")
-          .catch(() => null);
-        if (!fullAx && !shot?.base64) return;
+        // Text-only ambient push. Earlier versions also bundled a JPEG
+        // screenshot via `input_image`, but the Realtime API rejects that:
+        //   - role:"system" content schema only allows ONE input_text entry
+        //     (no images, max array length 1). API responds with
+        //     `array_above_max_length` and the item is never created, which
+        //     also breaks the next tick's rotation/delete (item not found).
+        //   - role:"user" with an image is schema-legal, but it confused
+        //     the server-side turn-boundary detector — see the VAD-stall
+        //     postmortem on 2026-05-14.
+        // We drop the ambient screenshot here. The model can still call
+        // observe_screen(mode='full') on demand when a turn actually needs
+        // visual context (charts, video frames, canvas-rendered apps).
+        // For text reading (articles, email, Slack, Notes, code), the AX
+        // tree already carries paragraph structure verbatim — paragraphs
+        // arrive as separate [text]: nodes. Watchers also operate purely
+        // on text classification, so no watcher path needed the image.
+        if (!fullAx || fullAx.trim().length <= 20) return;
 
-        // Drop the previous screen item so only one continuous-mode
-        // screenshot exists at any time.
+        // Drop the previous ambient context item so the conversation
+        // only carries the latest screen snapshot at any time.
         if (lastScreenItemIdRef.current) {
           try {
             s.transport.sendEvent({
@@ -916,24 +930,6 @@ export function useRealtime(): UseRealtimeReturn {
           : fullAx;
         const itemId = `ctx_${now}`;
         const scopeLabel = scopedApp ?? "all visible apps";
-        const content: Array<Record<string, string>> = [];
-        if (truncatedAx && truncatedAx.trim().length > 20) {
-          content.push({
-            type: "input_text",
-            text:
-              `[System: Background screen update — Samuel is in continuous observation mode (` +
-              `scope: ${scopeLabel}). This is silent context; do NOT proactively speak about ` +
-              `it unless the user asks or a registered watcher trigger fires. Current screen ` +
-              `content (Accessibility Tree, exact text):\n${truncatedAx}]`,
-          });
-        }
-        if (shot?.base64) {
-          content.push({
-            type: "input_image",
-            image_url: `data:image/jpeg;base64,${shot.base64}`,
-          });
-        }
-        if (content.length === 0) return;
         try {
           // role: "system" (not "user") so these silent updates don't
           // masquerade as user turns. role:"user" was confusing the
@@ -941,7 +937,21 @@ export function useRealtime(): UseRealtimeReturn {
           // VAD-stall postmortem on 2026-05-14.
           s.transport.sendEvent({
             type: "conversation.item.create",
-            item: { id: itemId, type: "message", role: "system", content },
+            item: {
+              id: itemId,
+              type: "message",
+              role: "system",
+              content: [
+                {
+                  type: "input_text",
+                  text:
+                    `[System: Background screen update — Samuel is in continuous observation mode (` +
+                    `scope: ${scopeLabel}). This is silent context; do NOT proactively speak about ` +
+                    `it unless the user asks or a registered watcher trigger fires. Current screen ` +
+                    `content (Accessibility Tree, exact text):\n${truncatedAx}]`,
+                },
+              ],
+            },
           });
           lastScreenItemIdRef.current = itemId;
           lastContinuousAxHashRef.current = axHash;
@@ -949,7 +959,7 @@ export function useRealtime(): UseRealtimeReturn {
           lastContinuousPushAtRef.current = now;
           debugLog(
             "continuous-screen",
-            `pushed scope=${scopeLabel} AX(${fullAx.length} chars, sent=${truncatedAx.length}, dLen=${lengthDelta}) + screenshot(${shot ? "yes" : "no"}) | item_id=${itemId}`,
+            `pushed scope=${scopeLabel} AX(${fullAx.length} chars, sent=${truncatedAx.length}, dLen=${lengthDelta}) | item_id=${itemId}`,
           );
         } catch (e) {
           debugLog("continuous-screen", `push failed: ${e}`, "warn");

@@ -46,7 +46,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 		model: "gpt-5.5",
 		tools: [
 			{
-				type: "computer_use_preview",
+				type: "computer",
 				display_width: VIEWPORT_W,
 				display_height: VIEWPORT_H,
 				environment: "browser",
@@ -67,7 +67,6 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 		],
 		reasoning: { effort: "medium" },
 		max_output_tokens: 2048,
-		truncation: "auto",
 	};
 
 	let resp = await callResponsesApi(apiKey, firstBody);
@@ -109,7 +108,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 			model: "gpt-5.5",
 			tools: [
 				{
-					type: "computer_use_preview",
+					type: "computer",
 					display_width: VIEWPORT_W,
 					display_height: VIEWPORT_H,
 					environment: "browser",
@@ -129,7 +128,6 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 			],
 			reasoning: { effort: "medium" },
 			max_output_tokens: 2048,
-			truncation: "auto",
 		};
 
 		resp = await callResponsesApi(apiKey, followBody);
@@ -175,7 +173,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 			model: "gpt-5.5",
 			tools: [
 				{
-					type: "computer_use_preview",
+					type: "computer",
 					display_width: NATIVE_W,
 					display_height: screenshotH,
 					environment: "mac",
@@ -196,7 +194,6 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 			],
 			reasoning: { effort: "medium" },
 			max_output_tokens: 2048,
-			truncation: "auto",
 		};
 
 		let resp = await callResponsesApi(apiKey, firstBody);
@@ -240,7 +237,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 				model: "gpt-5.5",
 				tools: [
 					{
-						type: "computer_use_preview",
+						type: "computer",
 						display_width: NATIVE_W,
 						display_height: screenshotH,
 						environment: "mac",
@@ -260,7 +257,6 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 				],
 				reasoning: { effort: "medium" },
 				max_output_tokens: 2048,
-				truncation: "auto",
 			};
 
 			resp = await callResponsesApi(apiKey, followBody);
