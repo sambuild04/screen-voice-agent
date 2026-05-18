@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 const STORAGE_KEY = "samuel-ui-prefs";
+const STORAGE_VERSION_KEY = "samuel-ui-prefs-version";
+// Bump when default values change in a way that should retroactively apply
+// to users still on the previous default. The migration step in `loadPrefs`
+// only nudges keys whose saved value matches the OLD default — explicit
+// customizations are preserved.
+const SCHEMA_VERSION = 2;
 
 // ── Schema-driven UI preferences ──────────────────────────────────────────
 // Every adjustable property is declared once here. The schema drives state
@@ -25,8 +31,11 @@ interface PropSchema {
 
 const SCHEMA: Record<string, PropSchema> = {
   // ── Avatar ──
+  // Default sized to roughly fill the default 520-wide window so the cat
+  // sprite isn't lost in negative space. Existing users on the old 320
+  // default get auto-upgraded via the v2 schema migration in loadPrefs.
   "avatar.size": {
-    type: "number", default: 320, min: 80, max: 800, step: 40, unit: "px",
+    type: "number", default: 640, min: 80, max: 1200, step: 80, unit: "px",
     cssVar: "--samuel-size",
     aliases: ["samuel.size", "character.size", "agent.size", "self.size", "me.size",
               "avatar.font_size", "samuel.font_size"],
@@ -120,6 +129,14 @@ const SCHEMA: Record<string, PropSchema> = {
   },
 
   // ── Privacy (non-visual but voice-toggleable) ──
+  // Two scopes:
+  //   • "proactive" toggles (screen_watch, audio_listen) — default OFF.
+  //     Gate the ambient watcher + learning loops only. Opt-in.
+  //   • "tool" master switches (screen_read, voice_input, computer_use) —
+  //     default ON. Gate the tools the model can call during a turn.
+  //     Flipping one off is a master kill-switch for that capability;
+  //     enforced in src/lib/samuel-privacy.ts + tool execute() guards
+  //     in src/lib/samuel.ts.
   "privacy.screen_watch": {
     type: "boolean", default: false,
     aliases: ["privacy.screen_watch_enabled", "privacy.screen"],
@@ -127,6 +144,18 @@ const SCHEMA: Record<string, PropSchema> = {
   "privacy.audio_listen": {
     type: "boolean", default: false,
     aliases: ["privacy.audio_listen_enabled", "privacy.audio", "privacy.microphone"],
+  },
+  "privacy.screen_read": {
+    type: "boolean", default: true,
+    aliases: ["privacy.screen_reading", "privacy.read_screen"],
+  },
+  "privacy.voice_input": {
+    type: "boolean", default: true,
+    aliases: ["privacy.voice", "privacy.mic", "privacy.microphone_input"],
+  },
+  "privacy.computer_use": {
+    type: "boolean", default: true,
+    aliases: ["privacy.desktop_automation", "privacy.cua", "privacy.automation"],
   },
   "privacy.local_time": {
     type: "boolean", default: false,
@@ -160,16 +189,41 @@ function buildDefaults(): UIPreferences {
 
 const DEFAULTS = buildDefaults();
 
+// One-time default-value upgrades, keyed by SCHEMA_VERSION. Each entry
+// describes a key whose default changed and the OLD default it had — saved
+// values matching that old default get bumped to the new default exactly
+// once (when savedVersion < the entry's `forVersion`). Users who explicitly
+// chose any other value keep their setting.
+const DEFAULT_UPGRADES: Array<{ forVersion: number; key: string; oldDefault: number | boolean | string }> = [
+  // v2 (2026-05): avatar.size default 320 → 640. The original default left
+  // a large gap between the window edge and the cat sprite; the new default
+  // closes that gap. See useUIPreferences SCHEMA "avatar.size".
+  { forVersion: 2, key: "avatar.size", oldDefault: 320 },
+];
+
 function loadPrefs(): UIPreferences {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+    const savedVersion = parseInt(localStorage.getItem(STORAGE_VERSION_KEY) ?? "0", 10);
     if (raw) {
       const saved = JSON.parse(raw);
       // Migrate legacy keys
       const migrated = migratePrefs(saved);
-      return { ...DEFAULTS, ...migrated };
+      const merged: UIPreferences = { ...DEFAULTS, ...migrated };
+      // Apply non-destructive default-bumps for any version the user is
+      // behind. Only touch values still set to the OLD default.
+      for (const upgrade of DEFAULT_UPGRADES) {
+        if (savedVersion < upgrade.forVersion && merged[upgrade.key] === upgrade.oldDefault) {
+          merged[upgrade.key] = SCHEMA[upgrade.key].default;
+        }
+      }
+      localStorage.setItem(STORAGE_VERSION_KEY, String(SCHEMA_VERSION));
+      return merged;
     }
   } catch {}
+  // Fresh install — defaults are already current; just record the version
+  // so future upgrades know nothing pre-existed.
+  try { localStorage.setItem(STORAGE_VERSION_KEY, String(SCHEMA_VERSION)); } catch {}
   return { ...DEFAULTS };
 }
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import { invoke } from "./invoke-bridge";
 import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
+import { privacy, privacyBlockError } from "./samuel-privacy";
 
 interface CaptureResult {
   base64: string;
@@ -431,6 +432,7 @@ const readAppTool = tool({
     return true;
   },
   async execute({ app, list_windows }) {
+    if (!privacy.canReadScreen()) return privacyBlockError("screen reading");
     try {
       const hasPermission = await invoke<boolean>("check_accessibility_permission").catch(() => true);
       if (!hasPermission) {
@@ -529,6 +531,7 @@ const listBrowserTabsTool = tool({
     ),
   }),
   async execute({ browser }) {
+    if (!privacy.canReadScreen()) return privacyBlockError("screen reading");
     try {
       const result = await invoke<string>("list_browser_tabs", { browser: browser ?? null });
       return toolOk(result);
@@ -565,6 +568,7 @@ const switchBrowserTabTool = tool({
     browser: z.string().optional().describe("Browser name. Default: 'Google Chrome'."),
   }),
   async execute({ tab_title, browser }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     try {
       const result = await invoke<string>("switch_browser_tab", {
         tabTitle: tab_title,
@@ -819,6 +823,7 @@ const desktopClickTool = tool({
     ),
   }),
   async execute({ x, y, click_type, target_app }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const blocked = guardAction("navigation", "desktop_click", `(${x}, ${y})`);
     if (blocked) return blocked;
     try {
@@ -851,6 +856,7 @@ const desktopTypeTool = tool({
     ),
   }),
   async execute({ text, target_app }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const blocked = guardAction("write", "desktop_type", `"${text.slice(0, 30)}..."`);
     if (blocked) return blocked;
     try {
@@ -884,6 +890,7 @@ const desktopKeyTool = tool({
     ),
   }),
   async execute({ key, modifiers, target_app }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const risk = classifyKeyRisk(key, modifiers);
     const blocked = guardAction(risk, "desktop_key", `${modifiers ? modifiers + "+" : ""}${key}`);
     if (blocked) return blocked;
@@ -911,6 +918,7 @@ const desktopScrollTool = tool({
     amount: z.number().optional().describe("Scroll amount in lines (default: 3)"),
   }),
   async execute({ direction, amount }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const blocked = guardAction("navigation", "desktop_scroll", direction);
     if (blocked) return blocked;
     try {
@@ -960,6 +968,7 @@ const pressElementTool = tool({
     element_description: z.string().describe("Text/title to match the UI element against"),
   }),
   async execute({ app_name, element_description }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const blocked = guardAction("navigation", "press_element", `${app_name}: ${element_description}`);
     if (blocked) return blocked;
     try {
@@ -1001,6 +1010,7 @@ const axTypeTool = tool({
     text: z.string().describe("Text to write into the field"),
   }),
   async execute({ app_name, element_description, text }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     const blocked = guardAction("write", "ax_type", `${app_name}: ${element_description}`);
     if (blocked) return blocked;
     try {
@@ -1304,6 +1314,7 @@ const observeScreenTool = tool({
     ),
   }),
   async execute({ mode, app_name, display }) {
+    if (!privacy.canReadScreen()) return privacyBlockError("screen reading");
     const effectiveMode = mode ?? "full";
     if (effectiveMode === "selection") {
       const text = await invoke<string>("get_selected_text");
@@ -1943,6 +1954,7 @@ const browserUseTool = tool({
     ms: z.number().optional().describe("For 'wait': milliseconds to wait (max 10000)"),
   }),
   async execute({ action, url, selector, text, key, direction, pixels, tabId, ms }) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     try {
       // Build params object for the Rust command
       const params: Record<string, unknown> = {};
@@ -2045,6 +2057,7 @@ const computerUseTool = tool({
     ),
   }),
   async execute({ task, mode, app, url }, details) {
+    if (!privacy.canControlComputer()) return privacyBlockError("computer use");
     // Rate limit: max 5 computer_use calls per minute (each runs a GPT-5.5 loop)
     const rateErr = rateLimitGuard("computer_use", 5);
     if (rateErr) return rateErr;

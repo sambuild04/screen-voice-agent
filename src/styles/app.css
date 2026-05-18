@@ -47,10 +47,17 @@ html, body, #root {
   flex: 1 1 auto;
 }
 
-/* Rive canvas container — size driven by CSS variable from voice UI control */
+/* Rive canvas container — size driven by CSS variable from voice UI control.
+   The cat-follow-the-mouse animation is listener-driven, so it needs raw
+   pointer events to reach the canvas. The parent .character-stage has
+   -webkit-app-region: drag, which on Electron eats pointer events for window
+   dragging — opting this region out of the drag region restores hover/move
+   tracking on the Rive hit area. The rest of the stage still drags the
+   window, the cat itself is interactive. */
 .character-avatar {
   width: var(--samuel-size, 320px);
   height: var(--samuel-size, 320px);
+  -webkit-app-region: no-drag;
   opacity: var(--samuel-opacity, 1);
   border-radius: 50%;
   overflow: hidden;
@@ -201,21 +208,25 @@ html, body, #root {
 .wake-button {
   display: flex;
   align-items: center;
-  gap: 6px;
-  background: rgba(6, 182, 212, 0.12);
-  border: 1px solid rgba(6, 182, 212, 0.3);
-  border-radius: 20px;
-  padding: 8px 16px;
+  gap: 8px;
+  background: rgba(6, 182, 212, 0.18);
+  border: 1px solid rgba(6, 182, 212, 0.45);
+  border-radius: 22px;
+  padding: 10px 20px;
   cursor: pointer;
   transition: all 0.2s ease;
   -webkit-app-region: no-drag;
+  font-size: 15px;
+  color: #cbd5e1;
+  box-shadow: 0 0 18px rgba(6, 182, 212, 0.18);
 }
 
 .wake-button:hover {
-  background: rgba(6, 182, 212, 0.25);
-  border-color: rgba(6, 182, 212, 0.5);
-  color: #e2e8f0;
-  transform: scale(1.03);
+  background: rgba(6, 182, 212, 0.28);
+  border-color: rgba(6, 182, 212, 0.6);
+  color: #f1f5f9;
+  transform: scale(1.04);
+  box-shadow: 0 0 24px rgba(6, 182, 212, 0.3);
 }
 
 .wake-button:active {
@@ -239,6 +250,49 @@ html, body, #root {
 
 .character-glow {
   animation: character-glow 2s ease-in-out infinite;
+}
+
+/* ── Sleeping state ──────────────────────────────────────────
+   When awaitingWake is on we visually mute the cat (slight desaturation
+   + dim) and float a "Zz" near the top-right of the avatar so the user
+   has an unmistakable cue that Samuel went to sleep and needs to be
+   woken with the wake phrase or the tap-to-wake button. The transition
+   smooths the wake/sleep handoff so it doesn't feel jumpy. */
+.character-sleeping {
+  filter: saturate(0.55) brightness(0.82);
+}
+.character-avatar {
+  transition: filter 0.6s ease-out;
+}
+
+.sleep-zzz {
+  position: absolute;
+  top: 8%;
+  right: 10%;
+  pointer-events: none;
+  z-index: 5;
+  display: flex;
+  gap: 3px;
+  align-items: flex-end;
+  user-select: none;
+}
+
+.sleep-zzz span {
+  font-family: "Comic Sans MS", "Marker Felt", cursive, sans-serif;
+  font-weight: 700;
+  color: #67e8f9;
+  text-shadow: 0 0 6px rgba(6, 182, 212, 0.55);
+  display: inline-block;
+  animation: sleep-bob 2.4s ease-in-out infinite;
+}
+
+.sleep-zzz span:nth-child(1) { font-size: 14px; animation-delay: 0s; }
+.sleep-zzz span:nth-child(2) { font-size: 18px; animation-delay: 0.4s; }
+.sleep-zzz span:nth-child(3) { font-size: 24px; animation-delay: 0.8s; }
+
+@keyframes sleep-bob {
+  0%, 100% { transform: translateY(0); opacity: 0.35; }
+  50% { transform: translateY(-6px); opacity: 1; }
 }
 
 /* ── Thinking Dots ───────────────────────────────────────── */

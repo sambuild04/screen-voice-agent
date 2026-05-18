@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { useRive, useStateMachineInput } from "@rive-app/react-canvas";
+import { useRive } from "@rive-app/react-canvas";
 import type { TranscriptEntry } from "../hooks/useRealtime";
 import type { AnalysisStage, RecordingAnalysis, RecordingState } from "../hooks/useRecordMode";
 import { ToolApprovalCard } from "./ToolApprovalCard";
@@ -59,23 +59,16 @@ export function Character({
   onAlwaysAllowApp,
   onAlwaysDenyApp,
 }: CharacterProps) {
-  const { rive, RiveComponent } = useRive({
+  // The cat-follow-the-mouse marketplace asset is listener-driven: a hit
+  // area inside the .riv tracks pointer position via internal IK constraints
+  // (Pupil_TARGET_X/Y, HeadTurn_IK_X), so we don't wire any state-machine
+  // inputs from React. Agent state is conveyed by the surrounding UI
+  // (speech bubble thinking dots, listening waveform, character-glow CSS).
+  const { RiveComponent } = useRive({
     src: "/character.riv",
     stateMachines: STATE_MACHINE,
     autoplay: true,
   });
-
-  const touchDown = useStateMachineInput(rive, STATE_MACHINE, "touchDown");
-  const touchUp = useStateMachineInput(rive, STATE_MACHINE, "touchUp");
-
-  useEffect(() => {
-    if (!rive) return;
-    if (agentState === "speaking" || agentState === "thinking") {
-      touchDown?.fire();
-    } else {
-      touchUp?.fire();
-    }
-  }, [agentState, rive, touchDown, touchUp]);
 
   // Show the latest assistant message as a speech bubble
   const latestAssistant = [...transcript]
@@ -159,9 +152,24 @@ export function Character({
         </div>
       )}
 
-      {/* Rive character */}
-      <div className={`character-avatar ${agentState === "speaking" ? "character-glow" : ""}`}>
+      {/* Rive character. When awaiting wake we dim the cat and float a Zz so
+          there's a clear visual cue Samuel is asleep — otherwise the speech
+          bubble from the previous turn makes it look like he's still active. */}
+      <div
+        className={[
+          "character-avatar",
+          agentState === "speaking" ? "character-glow" : "",
+          awaitingWake ? "character-sleeping" : "",
+        ].filter(Boolean).join(" ")}
+      >
         <RiveComponent />
+        {awaitingWake && (
+          <div className="sleep-zzz" aria-hidden="true">
+            <span>z</span>
+            <span>z</span>
+            <span>Z</span>
+          </div>
+        )}
       </div>
 
       {/* Chat input — centered below avatar */}

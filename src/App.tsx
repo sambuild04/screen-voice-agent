@@ -10,7 +10,6 @@ import { useUIPreferences } from "./hooks/useUIPreferences";
 import { playChime, playSleep } from "./lib/sounds";
 import { StatusBar } from "./components/StatusBar";
 import { Character } from "./components/Character";
-import { ScreenPicker } from "./components/ScreenPicker";
 import { TeachDrop } from "./components/TeachDrop";
 import { PluginApproval } from "./components/PluginApproval";
 import { SettingsPanel } from "./components/SettingsPanel";
@@ -64,11 +63,31 @@ export default function App() {
   const [envelopeOpen, setEnvelopeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const handlePrivacyToggle = useCallback((key: "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location") => {
+  const handlePrivacyToggle = useCallback((key:
+    | "privacy.screen_watch"
+    | "privacy.audio_listen"
+    | "privacy.screen_read"
+    | "privacy.voice_input"
+    | "privacy.computer_use"
+    | "privacy.local_time"
+    | "privacy.location"
+  ) => {
     const current = ui.prefs[key];
     const prop = key.split(".")[1];
     ui.applyUpdate({ component: "privacy", property: prop, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
+
+  // Master kill-switch enforcement for the realtime voice mic. When the user
+  // turns off Voice Input in Settings, force-mute the session immediately so
+  // no further audio reaches the model, and keep it muted until the toggle
+  // flips back. The mic button (rendered below) is disabled in this state so
+  // it can't fight the gate. Wake-word capture is also gated on this flag.
+  const voiceInputAllowed = ui.prefs["privacy.voice_input"] !== false;
+  useEffect(() => {
+    if (!voiceInputAllowed && !isMuted) {
+      mute(true);
+    }
+  }, [voiceInputAllowed, isMuted, mute]);
 
   // Register UI update bridge — used by plugins via plugin-loader's
   // uiHelper.set(). The voice-tool layer was removed (see samuel.ts) but
@@ -125,28 +144,41 @@ export default function App() {
     }
   }, [transcript]);
 
-  // When agentState goes idle after extended silence, re-enable wake word.
-  // 15 s grace period after activation so the greeting + first exchange
-  // don't prematurely flip back to wake-word mode.
-  const prevAgentState = useRef(agentState);
-  const sessionAge = Date.now() - sessionActiveAtRef.current;
-  if (
-    agentState === "idle" &&
-    prevAgentState.current !== "idle" &&
-    status === "connected" &&
-    !awaitingWake &&
-    sessionAge > 15_000 &&
-    record.recordingState === "idle"
-  ) {
-    playSleep();
-    mute(true);
-    setAwaitingWake(true);
-    extractFeedback();
-  }
-  prevAgentState.current = agentState;
+  // Auto-sleep when the agent has been idle for IDLE_SLEEP_DELAY_MS. We wait
+  // a generous chunk of time before flipping back to wake-word mode so the
+  // user can ask a quick follow-up after a response without having to say
+  // "Hey Samuel" again. If anything happens during the wait — agent starts
+  // speaking/listening, recording starts, status flips, awaitingWake is set
+  // manually — the cleanup tears the timer down and we re-arm next time.
+  // 15 s post-wake grace ensures the greeting + first exchange can't trip it.
+  const IDLE_SLEEP_DELAY_MS = 30_000;
+  const POST_WAKE_GRACE_MS = 15_000;
+  useEffect(() => {
+    const sessionAge = Date.now() - sessionActiveAtRef.current;
+    if (
+      agentState !== "idle" ||
+      status !== "connected" ||
+      awaitingWake ||
+      sessionAge < POST_WAKE_GRACE_MS ||
+      record.recordingState !== "idle"
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      playSleep();
+      mute(true);
+      setAwaitingWake(true);
+      extractFeedback();
+    }, IDLE_SLEEP_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [agentState, status, awaitingWake, record.recordingState, mute, extractFeedback]);
 
   useWakeWord({
-    enabled: awaitingWake,
+    // Gate wake-word capture on Voice Input privacy: when audio is privacy-
+    // disabled, we must not run the local mic listener either, otherwise the
+    // user's voice still reaches our process even though the realtime
+    // session is muted.
+    enabled: awaitingWake && voiceInputAllowed,
     onDetected: handleWakeDetected,
   });
 
@@ -210,7 +242,6 @@ export default function App() {
           {/* Full controls only when connected and active */}
           {status === "connected" && !awaitingWake && (
             <>
-              <ScreenPicker />
               {(record.recordingState === "idle" || record.recordingState === "results") && (
                 <button
                   onClick={record.startRecording}
@@ -221,11 +252,23 @@ export default function App() {
                 </button>
               )}
               <button
-                onClick={() => mute(!isMuted)}
+                onClick={() => {
+                  // Privacy gate wins over manual unmute attempts.
+                  if (!voiceInputAllowed) return;
+                  mute(!isMuted);
+                }}
+                disabled={!voiceInputAllowed}
+                title={
+                  !voiceInputAllowed
+                    ? "Voice Input is disabled in Settings → Privacy"
+                    : isMuted ? "Unmute" : "Mute"
+                }
                 className={`rounded-full p-2 transition-colors ${
-                  isMuted
-                    ? "bg-red-900/50 text-red-300"
-                    : "bg-white/10 text-slate-400 hover:text-slate-200"
+                  !voiceInputAllowed
+                    ? "bg-white/5 text-slate-600 cursor-not-allowed"
+                    : isMuted
+                      ? "bg-red-900/50 text-red-300"
+                      : "bg-white/10 text-slate-400 hover:text-slate-200"
                 }`}
               >
                 {isMuted ? <MicOffIcon /> : <MicIcon />}

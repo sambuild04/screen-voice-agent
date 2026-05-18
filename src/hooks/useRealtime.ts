@@ -453,6 +453,13 @@ export function useRealtime(): UseRealtimeReturn {
   // behind a finished utterance.
   const assistantRevealedLenRef = useRef(0);
   const assistantRevealTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Audio playback latches true on `audio_start` and resets on response.done.
+  // The reveal timer waits for this latch — text deltas typically arrive
+  // 200-500ms before audio actually plays (TTS pipeline startup latency),
+  // so without this gate the bubble always finishes ~one phrase ahead of
+  // Samuel's voice. Buffering deltas in `assistantBufferRef` until audio
+  // starts keeps the visible bubble synchronized with what the user hears.
+  const assistantAudioStartedRef = useRef(false);
   // ~16 chars/sec is a typical conversational TTS rate for English realtime
   // voices; CJK transcript characters carry more information per glyph and
   // tolerate a slower reveal, but a single rate is a reasonable approximation.
@@ -1112,6 +1119,24 @@ export function useRealtime(): UseRealtimeReturn {
       if (!userMutedRef.current) {
         session.mute(true);
       }
+      // The SDK's `audio_start` fires when the first audio chunk reaches the
+      // transport (`realtimeSession.mjs`: `if (!#audioStarted) emit('audio_start')`),
+      // which is the closest signal we get to "voice is starting to play".
+      // Text deltas race ahead of audio by 200-500ms (TTS pipeline latency
+      // — OpenAI confirms there's no 1:1 sync between text/audio deltas), so
+      // we defer both bubble creation and reveal-timer start to this event.
+      // That keeps the visible chat bubble from materializing or sprinting
+      // ahead of Samuel's voice.
+      assistantAudioStartedRef.current = true;
+      if (!assistantEntryIdRef.current && assistantBufferRef.current.length > 0) {
+        const entry = makeEntry("assistant", "");
+        assistantEntryIdRef.current = entry.id;
+        assistantRevealedLenRef.current = 0;
+        setTranscript((prev) => [...prev, entry]);
+      }
+      if (assistantEntryIdRef.current && assistantBufferRef.current.length > 0) {
+        startRevealTimer();
+      }
     });
 
     session.on("audio_stopped", () => {
@@ -1371,6 +1396,12 @@ export function useRealtime(): UseRealtimeReturn {
 
     const startRevealTimer = () => {
       if (assistantRevealTimerRef.current) return;
+      // Don't reveal anything until the audio pipeline has actually started
+      // playback. Text deltas race ahead of audio by 200-500ms; revealing
+      // them on text-delta arrival makes the bubble finish before the voice
+      // catches up. The audio_start handler latches assistantAudioStartedRef
+      // and re-calls startRevealTimer once audio is live.
+      if (!assistantAudioStartedRef.current) return;
       const charsPerTick = (REVEAL_CHARS_PER_SEC * REVEAL_TICK_MS) / 1000;
       let acc = 0;
       assistantRevealTimerRef.current = setInterval(() => {
@@ -1607,16 +1638,21 @@ export function useRealtime(): UseRealtimeReturn {
           if (delta) {
             setAgentState("speaking");
             assistantBufferRef.current += delta;
-            // Create the bubble entry on first delta. Start with an empty
-            // visible text and let the reveal timer fill it in at TTS rate
-            // so the bubble doesn't sprint ahead of Samuel's voice.
-            if (!assistantEntryIdRef.current) {
-              const entry = makeEntry("assistant", "");
-              assistantEntryIdRef.current = entry.id;
-              assistantRevealedLenRef.current = 0;
-              setTranscript((prev) => [...prev, entry]);
+            // Defer bubble creation + reveal timer start until audio_start
+            // has fired. The OpenAI Realtime API streams text and audio on
+            // independent channels with no 1:1 mapping; text deltas land
+            // 200-500ms ahead of audio, so creating the bubble here would
+            // flash an empty bubble during the lead window. The audio_start
+            // handler handles bubble creation once playback actually starts.
+            if (assistantAudioStartedRef.current) {
+              if (!assistantEntryIdRef.current) {
+                const entry = makeEntry("assistant", "");
+                assistantEntryIdRef.current = entry.id;
+                assistantRevealedLenRef.current = 0;
+                setTranscript((prev) => [...prev, entry]);
+              }
+              startRevealTimer();
             }
-            startRevealTimer();
           }
           break;
         }
@@ -1637,6 +1673,15 @@ export function useRealtime(): UseRealtimeReturn {
             assistantBufferRef.current = finalText;
             if (assistantEntryIdRef.current) {
               flushRevealAssistantText();
+            } else {
+              // Defensive: bubble creation is normally gated on audio_start,
+              // but if audio_start somehow never fired (audio failure or a
+              // text-only response), still surface the final text so the
+              // user sees Samuel's reply in the transcript.
+              const entry = makeEntry("assistant", finalText);
+              assistantEntryIdRef.current = entry.id;
+              assistantRevealedLenRef.current = finalText.length;
+              setTranscript((prev) => [...prev, entry]);
             }
           }
           stopRevealTimer();
@@ -1679,6 +1724,11 @@ export function useRealtime(): UseRealtimeReturn {
           assistantBufferRef.current = "";
           assistantEntryIdRef.current = null;
           assistantRevealedLenRef.current = 0;
+          // Re-arm the audio-start gate so the next response defers bubble
+          // creation + reveal until its own audio_start fires. The SDK
+          // mirrors this by resetting `#audioStarted` to false on
+          // `turn_started` (realtimeSession.mjs:484-485).
+          assistantAudioStartedRef.current = false;
           agentResponseCountRef.current += 1;
           responseInProgressRef.current = false;
           setAgentState("listening");

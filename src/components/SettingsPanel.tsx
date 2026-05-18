@@ -2,7 +2,14 @@ import { useState } from "react";
 import { invoke } from "../lib/invoke-bridge";
 import type { UIPreferences } from "../hooks/useUIPreferences";
 
-type ToggleKey = "privacy.screen_watch" | "privacy.audio_listen" | "privacy.local_time" | "privacy.location";
+type ToggleKey =
+  | "privacy.screen_watch"
+  | "privacy.audio_listen"
+  | "privacy.screen_read"
+  | "privacy.voice_input"
+  | "privacy.computer_use"
+  | "privacy.local_time"
+  | "privacy.location";
 
 interface Props {
   visible: boolean;
@@ -70,11 +77,60 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
         <div className="settings-section">
           <div className="settings-section-title">Privacy Controls</div>
 
+          {/* Master capability switches — disable a tool family entirely.
+              Enforced in src/lib/samuel-privacy.ts + tool guards. */}
           <label className="settings-toggle-row">
             <div className="settings-toggle-info">
-              <span className="settings-toggle-label">Screen Watching</span>
+              <span className="settings-toggle-label">Screen Reading</span>
               <span className="settings-toggle-desc">
-                Allow Samuel to observe your screen for language hints
+                Let Samuel read on-screen content (apps, browser tabs) when you ask
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs["privacy.screen_read"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.screen_read")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
+              <span className="settings-toggle-label">Voice Input</span>
+              <span className="settings-toggle-desc">
+                Let Samuel hear your voice for conversation and the wake word
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs["privacy.voice_input"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.voice_input")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
+              <span className="settings-toggle-label">Computer Use</span>
+              <span className="settings-toggle-desc">
+                Let Samuel click, type, and operate apps on your desktop
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs["privacy.computer_use"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.computer_use")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          {/* Proactive observation — separate from the master switches.
+              These default off and only gate ambient watcher / learning loops. */}
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
+              <span className="settings-toggle-label">Proactive Screen Watch</span>
+              <span className="settings-toggle-desc">
+                Let Samuel watch your screen between turns for language hints
               </span>
             </div>
             <div
@@ -87,9 +143,9 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
 
           <label className="settings-toggle-row">
             <div className="settings-toggle-info">
-              <span className="settings-toggle-label">Audio Listening</span>
+              <span className="settings-toggle-label">Proactive Audio Listening</span>
               <span className="settings-toggle-desc">
-                Allow Samuel to hear ambient audio for language learning
+                Let Samuel passively listen for ambient audio between turns
               </span>
             </div>
             <div
