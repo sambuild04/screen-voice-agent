@@ -88,10 +88,13 @@ export function Character({
     }
   }, [latestAssistant?.text]);
 
-  // Show the latest user message as a speech bubble
-  const latestUser = [...transcript]
-    .reverse()
-    .find((e) => e.role === "user" && e.text !== "...");
+  // The user's chat bubble was removed intentionally: the side-channel
+  // transcribe model occasionally regurgitates its own bias prompt verbatim
+  // on unclear audio (a Whisper-family hallucination signature), which
+  // surfaced in the bubble as "Samuel: Mac voice assistant for desktop
+  // control and language study…". The agent's response is enough feedback
+  // that the user was heard correctly; speaker text is still kept in the
+  // session transcript and logs for debugging.
 
   const showThinking = agentState === "thinking";
   const showListening = agentState === "listening" && !awaitingWake;
@@ -205,14 +208,6 @@ export function Character({
             />
           </div>
         ))}
-
-      {/* User's speech bubble — bottom left of character */}
-      {latestUser && (
-        <div className="speech-bubble speech-bubble-user">
-          <p>{latestUser.text}</p>
-          <div className="speech-tail speech-tail-right" />
-        </div>
-      )}
 
       {/* State indicator — tap to wake manually */}
       {awaitingWake && (

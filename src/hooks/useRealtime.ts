@@ -155,11 +155,37 @@ const HARD_STOP_PATTERN =
 // HARD LIMIT 1024 chars enforced by the Realtime API; if exceeded, the
 // whole session.update is rejected and Samuel comes up as a generic
 // assistant with no tools.
-const TRANSCRIPTION_BIAS_PROMPT =
-  "Samuel: Mac voice assistant for desktop control and language study. " +
-  "Wake words: Samuel, Sam, Sammy. " +
-  "Japanese study: JLPT N5 N4 N3 N2 N1, romaji, hiragana, katakana, kanji, " +
-  "pitch accent, particle, conjugation.";
+//
+// FORMAT: comma-separated keyword list ONLY — never sentences. This is
+// load-bearing. OpenAI's transcription prompt biases the decoder toward
+// listed tokens; on unclear audio (music sections, silence, mic gaps)
+// the transcribe model regurgitates the prompt verbatim as if it were
+// user speech. If the prompt reads like a sentence, the regurgitation
+// is grammatically valid English and bypasses noise filters, looking
+// like a real user instruction. Postmortem 2026-05-21: a sentence-form
+// prompt produced fake "Samuel: Mac voice assistant for desktop control
+// and language study." turns that the realtime model interpreted as a
+// stop-recording command, killing the song-capture flow ~1s in.
+//
+// Per OpenAI docs (transcription guide) + Whisper community guidance:
+// "Use the prompt parameter to provide vocabulary lists, acronyms, and
+// desired formatting." Keyword bag, no descriptions, no instructions,
+// no sentence punctuation.
+//
+// MINIMAL — only wake words. Postmortem 2026-05-23: even the keyword
+// form regurgitated as 1–3 token fragments ("Sammy, JLPT, hiragana.",
+// "JLPT", "kanji", "pitch accent") and the realtime model treated them
+// as user input. Each extra keyword in the prompt is another fragment
+// the transcribe model can hallucinate on silent / music sections.
+//
+// What we keep: Samuel/Sam/Sammy — load-bearing because the wake-word
+// detector reads this transcript ("Sammy" is otherwise mistranscribed
+// as "Sam, he" / "salmon"). The realtime model itself hears the audio
+// directly and never sees this prompt, so dropping the Japanese-study
+// terms costs ONLY chat-UI cosmetic spelling on the side-channel
+// transcript. Worth it: those terms triggered the largest regurg
+// fragments and the realtime model still understands them perfectly.
+const TRANSCRIPTION_BIAS_PROMPT = "Samuel, Sam, Sammy";
 
 // Static guard — fail fast in dev so a future edit doesn't silently strip
 // the whole session config again. Realtime API ceiling is 1024.
@@ -174,7 +200,13 @@ if (TRANSCRIPTION_BIAS_PROMPT.length > 1024) {
 // transcriptions of "Samuel" / "Sammy" addressed at the start or middle of
 // an utterance. Tuned to fire on real addressing, not coincidental mentions
 // (e.g. somebody on a podcast saying the word "Samuel").
-const WAKE_PATTERN = /\b(hey\s+)?(samuel|sammy|samly|sam(?:\s|,|$))\b/i;
+// `\b` boundary handles punctuation correctly: "Sam." → boundary between
+// `m` and `.`, while "Sammy" / "Samuel" / "samurai" all correctly skip
+// the bare `sam` alternation because the next char is a word char (no
+// boundary). Earlier version used `sam(?:\s|,|$)` which rejected real
+// wakes like "Sam." and "Sam!" because the trailing punctuation wasn't
+// in the explicit set.
+const WAKE_PATTERN = /\b(?:hey\s+)?(?:samuel|sammy|samly|sam)\b/i;
 
 function addressesSamuel(text: string): boolean {
   if (!text) return false;
@@ -284,6 +316,56 @@ function looksLikeMediaNoise(text: string): boolean {
   return false;
 }
 
+// gpt-4o-transcribe occasionally emits its own bias prompt verbatim when it
+// can't make sense of the input audio (silence, noise floor, non-speech
+// segments). This is a documented Whisper-family failure mode. Because the
+// bias prompt contains the literal string "Samuel", these regurgitations:
+//   1) pass the wake-word exemption inside looksLikeMediaNoise,
+//   2) pass addressesSamuel() in passive-listening mode,
+// so they reach the model as if the user read the system instructions
+// aloud. After a few rounds the conversation history is so saturated with
+// "Samuel: Mac voice assistant for desktop control and language study…"
+// turns + matching "I'll stay quiet" replies that the model locks into
+// that pattern and stops responding to real wake-word turns. Catch the
+// regurgitation here and drop the turn at the same gate that drops media
+// bleed and echoes.
+//
+// Detector strategy: count distinctive phrases from the bias prompt that
+// no real user would speak conversationally. One strong hit is enough.
+// Keep this list in sync with TRANSCRIPTION_BIAS_PROMPT — distinctive
+// substrings only, never single common words like "Samuel" or "JLPT".
+const BIAS_PROMPT_SIGNATURES: RegExp[] = [
+  // Old sentence-form prompt (belt-and-suspenders for stale sessions).
+  /\bmac\s+voice\s+assistant\b/i,
+  /\bwake\s+words?\s*[:,]\s*samuel/i,
+  /\bjlpt\s+n5\s+n4\s+n3\b/i,
+  /\bdesktop\s+control\s+and\s+language\b/i,
+  // Legacy 11-keyword list fragments — caught the most common
+  // 2-keyword combos that leaked when the bias prompt included the
+  // Japanese study vocabulary. Kept so a transitional session that
+  // somehow regurgitates the old prompt still gets dropped.
+  /\b(?:samuel|sam|sammy)\s*,\s*(?:jlpt|hiragana|katakana|kanji|romaji|pitch\s+accent|particle|conjugation)\b/i,
+  /\bjlpt\s*,\s*(?:hiragana|katakana|kanji|romaji)\b/i,
+  /\b(?:hiragana|katakana|kanji|romaji)\s*,\s*(?:hiragana|katakana|kanji|romaji|pitch\s+accent|particle|conjugation)\b/i,
+  /\bpitch\s+accent\s*,\s*particle\b/i,
+  /\bparticle\s*,\s*conjugation\b/i,
+  // Current minimal wake-word prompt: any two of {Samuel, Sam, Sammy}
+  // joined by a comma is regurg — a real user does not chant their
+  // assistant's three name variants in a row. Lone "Samuel" / "Sam" /
+  // "Sammy" is intentionally NOT flagged: it's indistinguishable from
+  // a real wake-word call, and the wake-word handler treats it as
+  // such (the model decides whether there's a follow-up question).
+  /\b(?:samuel|sam|sammy)\s*,\s*(?:samuel|sam|sammy)\b/i,
+];
+
+function looksLikeBiasPromptRegurg(text: string): boolean {
+  if (!text) return false;
+  for (const sig of BIAS_PROMPT_SIGNATURES) {
+    if (sig.test(text)) return true;
+  }
+  return false;
+}
+
 // Architectural backstop for the LLM say-do gap (the model emits "I'll do
 // X" prose without the matching tool call). We detect forward-looking
 // commitments paired with action verbs that map to real tools, so a turn
@@ -314,6 +396,18 @@ const SAYDO_RECAP_RE =
 // action. "Save" matched too aggressively on "saves time" / "savings" —
 // hence dropped from SAYDO_ACTION_RE entirely; "remember" stays out for
 // the same reason.
+//
+// User-action-conditional commitments — the model is asking the USER
+// to do something first, then promising a follow-up ("Please pause
+// and I'll read it", "If you select the text, I'll translate", "Once
+// you stop the video, I'll explain"). These are NOT unconditional
+// self-commitments and firing the saydo nudge here would loop the
+// model into trying to act before the user has done their part.
+// Postmortem 2026-05-23: "Please pause on a line where the subtitle
+// text is visible, and I'll read and teach it" tripped the nudge,
+// causing a redundant follow-up response.
+const SAYDO_CONDITIONAL_RE =
+  /\b(?:please\b|if\s+you\b|once\s+you\b|when\s+you\b|after\s+you\b|whenever\s+you\b|tell\s+me\s+(?:when|once|after|which)\b|let\s+me\s+know\s+(?:when|once|after|which)\b)/i;
 function looksLikeUnactedCommitment(text: string): boolean {
   if (!text || text.length < 8) return false;
   // Strip quoted spans — "I'll" inside a quote is reporting speech, not
@@ -325,6 +419,10 @@ function looksLikeUnactedCommitment(text: string): boolean {
   // Self-recap explaining what just happened — also not a fresh
   // commitment. Without this, "what are you doing?" answers loop.
   if (SAYDO_RECAP_RE.test(stripped)) return false;
+  // Conditional on user action — the model is gating on the user.
+  // Firing a nudge here causes Samuel to re-answer before the user has
+  // performed the requested step.
+  if (SAYDO_CONDITIONAL_RE.test(stripped)) return false;
   return SAYDO_COMMIT_RE.test(stripped) && SAYDO_ACTION_RE.test(stripped);
 }
 
@@ -558,6 +656,18 @@ export function useRealtime(): UseRealtimeReturn {
   const lastMediaNoiseAtRef = useRef(0);
   const MEDIA_NOISE_PASSIVE_THRESHOLD = 4;
   const MEDIA_NOISE_DECAY_MS = 30_000;
+
+  // Follow-up grace: after a manually-fired wake-word response completes
+  // in passive mode, give the user a short window to ask a follow-up
+  // without re-saying "Samuel". 15s is the OpenAI agents-py default for
+  // similar barge-in/follow-up patterns and matches Siri/Alexa UX.
+  const lastPassiveResponseAtRef = useRef(0);
+  const PASSIVE_FOLLOWUP_GRACE_MS = 15_000;
+
+  // Stash the server-VAD-flipping helper so armAutoPassive (defined
+  // before the SDK session is constructed) can call it. Wired up inside
+  // the connect() effect once setServerCreateResponse exists.
+  const autoPassiveSyncRef = useRef<((engaged: boolean) => void) | null>(null);
   // Say-do guard: true once we've nudged Samuel for a commitment-without-
   // tool-call this user-turn. Reset on the next speech_stopped so the
   // nudge fires at most once per turn (no infinite re-prompt loop).
@@ -598,6 +708,9 @@ export function useRealtime(): UseRealtimeReturn {
     if (passiveListeningRef.current) return false;
     passiveListeningRef.current = true;
     autoPassiveRef.current = true;
+    // Server VAD: stop auto-creating responses until a wake-word turn
+    // manually fires response.create. Same gate as manual passive.
+    autoPassiveSyncRef.current?.(true);
     debugLog("listening-mode", `auto-armed wake-word gate (${reason})`);
     if (statusMessage) {
       setTranscript((prev) => [...prev, makeEntry("status", statusMessage)]);
@@ -825,6 +938,60 @@ export function useRealtime(): UseRealtimeReturn {
       }
     });
 
+    // Server-side gate for "stop talking but keep listening". When passive
+    // mode engages we flip turn_detection.create_response to false: the
+    // server still runs VAD, still chunks audio, still emits transcripts,
+    // but does NOT auto-create model responses. The client manually fires
+    // response.create only when the wake-word check passes.
+    //
+    // Without this flip, every TV bleed / ambient audio chunk produced a
+    // tiny "Acknowledged, sir." / "Standing by, sir." filler before our
+    // session.interrupt() arrived (the response was already started when
+    // the transcript landed). Per OpenAI's prompting guide and Realtime
+    // VAD docs, create_response: false is the canonical pattern for
+    // "actively listen, never auto-speak". We re-enable on exit.
+    //
+    // Docs:
+    //   https://developers.openai.com/api/docs/guides/realtime-vad
+    //   https://developers.openai.com/api/docs/guides/realtime-models-prompting#handle-silence-and-background-audio
+    const setServerCreateResponse = (enabled: boolean) => {
+      const s = sessionRef.current;
+      if (!s) return;
+      try {
+        s.transport.sendEvent({
+          type: "session.update",
+          session: {
+            // REQUIRED: GA Realtime API rejects session.update without a
+            // top-level session.type discriminator with
+            // `invalid_request_error: Missing required parameter: 'session.type'`.
+            // The SDK's own buildSessionPayload always sets this; raw
+            // sendEvent has to set it too. Without this field, the server
+            // silently ignored every passive-mode flip and kept auto-
+            // responding to media bleed (postmortem 2026-05-21).
+            type: "realtime",
+            audio: {
+              input: {
+                turn_detection: {
+                  type: "server_vad",
+                  threshold: 0.6,
+                  prefix_padding_ms: 400,
+                  silence_duration_ms: 700,
+                  create_response: enabled,
+                  interrupt_response: true,
+                },
+              },
+            },
+          },
+        });
+        debugLog(
+          "listening-mode",
+          `server VAD create_response=${enabled} (${enabled ? "auto-respond" : "manual-fire only"})`,
+        );
+      } catch (e) {
+        debugLog("listening-mode", `session.update failed: ${e}`, "warn");
+      }
+    };
+
     // Register passive-listening toggle. When passive=true, the transcript
     // handler cancels VAD-triggered auto-responses unless the user
     // addresses Samuel by name (or, in auto-passive, gives a clear
@@ -836,8 +1003,22 @@ export function useRealtime(): UseRealtimeReturn {
       // user choice.
       autoPassiveRef.current = false;
       clearInactivityTimer();
+      // Reset the follow-up grace window — entering or leaving passive is
+      // a hard mode boundary, not a continuation.
+      lastPassiveResponseAtRef.current = 0;
+      // Flip server-side auto-response. In passive mode, only manual
+      // response.create (on wake-word match) produces a model reply.
+      setServerCreateResponse(!passive);
       debugLog("listening-mode", passive ? "PASSIVE (manual) — ignore mic until addressed" : "NORMAL — auto-respond to clear speech");
     });
+
+    // Auto-passive (idle timer / media-noise streak) takes the same path
+    // as manual passive: flip server-side auto-response off so background
+    // audio doesn't keep producing filler.
+    autoPassiveSyncRef.current = (engaged: boolean) => {
+      lastPassiveResponseAtRef.current = 0;
+      setServerCreateResponse(!engaged);
+    };
 
     // ── Continuous screen observation (opt-in, off by default) ──────
     // Cheap djb2 hash for content-change detection.
@@ -1334,43 +1515,61 @@ export function useRealtime(): UseRealtimeReturn {
     // so the next wake word triggers a fresh reconnect.
     // Handled via transport wildcard events ("session.closed" / "close").
 
-    // ── Post-trigger transcript guard ─────────────────────────────────────
-    // The session's server VAD now auto-responds at speech_stopped (see
-    // session.config.audio.input.turnDetection.create_response above), so
-    // by the time the transcript arrives the model is already speaking.
-    // If the transcript reveals the audio was bogus (echo, media bleed,
-    // passive-listening with no wake word), we cancel the in-flight
-    // response via session.interrupt(). Otherwise we let it run.
+    // ── Passive-mode response decision ───────────────────────────────────
+    // When passive mode is engaged, server VAD has create_response=false
+    // (see setServerCreateResponse), so the server does NOT auto-create a
+    // response on speech_stopped. The client decides per-transcript:
     //
-    // Returns true if the auto-response should be cancelled, false to let
-    // it proceed.
-    const shouldCancelAutoResponse = (transcript: string): { cancel: boolean; reason?: string } => {
-      // Passive listening: drop turns that don't address Samuel (manual
-      // passive) or aren't a clear command/service mention (auto-passive).
-      if (passiveListeningRef.current && transcript) {
-        const wakeMatched = addressesSamuel(transcript);
-        const trimmed = transcript.trim();
-        const commandIntent = autoPassiveRef.current
-          && (COMMAND_VERB_PATTERN.test(trimmed) || SERVICE_PATTERN.test(trimmed));
-        if (!wakeMatched && !commandIntent) {
-          return {
-            cancel: true,
-            reason: `${autoPassiveRef.current ? "auto-passive" : "passive"}: no wake/command in "${transcript}"`,
-          };
-        }
-        // Auto-disengage if it was the timer that armed passive.
-        if (autoPassiveRef.current) {
-          passiveListeningRef.current = false;
-          autoPassiveRef.current = false;
-          mediaNoiseStreakRef.current = 0;
-          lastMediaNoiseAtRef.current = 0;
-          debugLog(
-            "listening-mode",
-            `${wakeMatched ? "wake word" : "command-verb intent"} in "${transcript}" — exiting auto-passive`,
-          );
-        }
+    //   - Wake word ("Samuel", "Sam", etc.) → fire response.create.
+    //   - Auto-passive + command-verb / service mention → fire (the user
+    //     said something that's clearly an instruction, e.g. "open spotify").
+    //   - Within follow-up grace window after a recent wake-word reply →
+    //     fire (so "and tomorrow?" works after "hey Samuel, weather?").
+    //   - Otherwise → silently drop the turn. Audio stays in conversation
+    //     history (so a later "what did they just say?" still works).
+    //
+    // In NORMAL mode (passive=false), server VAD auto-creates the response
+    // and this function is a no-op.
+    const decidePassiveResponse = (
+      transcript: string,
+    ): { fire: boolean; reason: string } => {
+      if (!passiveListeningRef.current || !transcript) {
+        return { fire: false, reason: "not-passive" };
       }
-      return { cancel: false };
+      const trimmed = transcript.trim();
+      const wakeMatched = addressesSamuel(trimmed);
+      const commandIntent = autoPassiveRef.current
+        && (COMMAND_VERB_PATTERN.test(trimmed) || SERVICE_PATTERN.test(trimmed));
+      const followUpOpen = lastPassiveResponseAtRef.current > 0
+        && Date.now() - lastPassiveResponseAtRef.current < PASSIVE_FOLLOWUP_GRACE_MS;
+      if (!wakeMatched && !commandIntent && !followUpOpen) {
+        return {
+          fire: false,
+          reason: `${autoPassiveRef.current ? "auto-passive" : "passive"}: no wake/command in "${trimmed}"`,
+        };
+      }
+      // Auto-disengage if it was the timer / media-streak detector that
+      // armed passive — the user has clearly engaged again. Manual
+      // passive (set_listening_mode tool) only exits via the user asking.
+      if (autoPassiveRef.current) {
+        passiveListeningRef.current = false;
+        autoPassiveRef.current = false;
+        mediaNoiseStreakRef.current = 0;
+        lastMediaNoiseAtRef.current = 0;
+        autoPassiveSyncRef.current?.(false);
+        debugLog(
+          "listening-mode",
+          `${wakeMatched ? "wake word" : "command-verb intent"} in "${trimmed}" — exiting auto-passive`,
+        );
+      }
+      return {
+        fire: true,
+        reason: wakeMatched
+          ? `wake word in "${trimmed}"`
+          : commandIntent
+            ? `command intent in "${trimmed}"`
+            : `follow-up grace (${Math.round((Date.now() - lastPassiveResponseAtRef.current) / 1000)}s)`,
+      };
     };
 
 
@@ -1518,9 +1717,17 @@ export function useRealtime(): UseRealtimeReturn {
           // so post-transcript filtering is the next best gate.
           const isMediaNoise = !!text && looksLikeMediaNoise(text);
 
-          if (isNoise || isLikelyEcho || isMediaNoise) {
+          // Detect bias-prompt regurgitation (gpt-4o-transcribe emitting its
+          // own prompt verbatim on unclear audio). MUST run before the
+          // wake-word / passive gates downstream — the regurgitation
+          // contains "Samuel" and would otherwise sneak through them.
+          const isBiasPromptRegurg = !!text && looksLikeBiasPromptRegurg(text);
+
+          if (isNoise || isLikelyEcho || isMediaNoise || isBiasPromptRegurg) {
             if (isLikelyEcho) {
               debugLog("echo-guard", `DROPPED echo "${text}" (${msSinceAgentSpoke}ms after agent)`);
+            } else if (isBiasPromptRegurg) {
+              debugLog("echo-guard", `DROPPED bias-prompt regurgitation "${text.slice(0, 60)}…"`);
             } else if (isMediaNoise) {
               debugLog("echo-guard", `DROPPED media-noise "${text}"`);
             } else if (isNoise) {
@@ -1611,22 +1818,28 @@ export function useRealtime(): UseRealtimeReturn {
             break;
           }
 
-          // Real transcript — server VAD already triggered the response
-          // when speech_stopped fired. Check passive-listening here: if
-          // it's engaged and the user didn't address Samuel, cancel the
-          // in-flight auto-response.
-          const passiveDecision = shouldCancelAutoResponse(text);
-          if (passiveDecision.cancel) {
-            debugLog("listening-mode", `dropping turn — ${passiveDecision.reason}`);
-            if (responseInProgressRef.current) {
+          // Real transcript. In NORMAL mode, server VAD already fired
+          // response.create at speech_stopped — nothing to do here. In
+          // PASSIVE mode, server VAD has create_response=false, so the
+          // server is silent unless we manually fire response.create
+          // (only for wake-word / command / follow-up matches).
+          if (passiveListeningRef.current) {
+            const decision = decidePassiveResponse(text);
+            if (decision.fire) {
+              debugLog("listening-mode", `firing response — ${decision.reason}`);
               try {
-                sessionRef.current?.interrupt();
+                sessionRef.current?.transport.sendEvent({ type: "response.create" });
               } catch (e) {
-                debugLog("turn", `interrupt failed: ${e}`, "warn");
+                debugLog("listening-mode", `response.create failed: ${e}`, "warn");
               }
-            }
-            if (!responseInProgressRef.current) {
-              setAgentState("listening");
+            } else {
+              debugLog("listening-mode", `holding silent — ${decision.reason}`);
+              // The user item is already in conversation history (so a
+              // later "what did they just say?" still works), but no
+              // model response was created. Keep agentState consistent.
+              if (!responseInProgressRef.current) {
+                setAgentState("listening");
+              }
             }
           }
           break;
@@ -1731,6 +1944,12 @@ export function useRealtime(): UseRealtimeReturn {
           assistantAudioStartedRef.current = false;
           agentResponseCountRef.current += 1;
           responseInProgressRef.current = false;
+          // Open the passive-mode follow-up grace window. After a
+          // wake-word reply, the next ~15s of user speech can fire a
+          // response without re-saying "Samuel" (Siri/Alexa-style UX).
+          if (passiveListeningRef.current) {
+            lastPassiveResponseAtRef.current = Date.now();
+          }
           setAgentState("listening");
 
           // SAY-DO BACKSTOP: prompt rules are fragile because the model

@@ -530,6 +530,103 @@ export async function memory_clear(): Promise<void> {
 	console.error("[memory] cleared all data");
 }
 
+// ── Per-item inspection + deletion ───────────────────────────────────────────
+//
+// The settings panel's Memory Browser uses these to surface and prune
+// individual entries. Every category is keyed by either a string name (facts,
+// vocabulary, watch ids, corrections — by timestamp) or a numeric index
+// (observations, transcripts) — pick whichever is stable for that category.
+// Returns the post-delete count so the renderer can refresh without a
+// follow-up list call.
+
+export interface MemorySnapshot {
+	facts: Array<{ key: string; value: string }>;
+	observations: Array<{ index: number; text: string }>;
+	transcripts: Array<{ index: number; text: string }>;
+	vocabulary: Array<{ word: string; timestamp: number; permanent: boolean }>;
+	corrections: Array<{ timestamp: number; what: string; source: string }>;
+	watches: WatchAlert[];
+}
+
+export async function memory_snapshot(): Promise<MemorySnapshot> {
+	return withMemory((mem) => {
+		const facts = Object.entries(mem.facts).map(([key, value]) => ({ key, value }));
+		const observations = mem.recent_observations.map((text, index) => ({ index, text }));
+		const transcripts = mem.recent_transcripts.map((text, index) => ({ index, text }));
+		const vocabulary = Object.entries(mem.vocabulary_seen).map(([word, ts]) => ({
+			word,
+			timestamp: ts,
+			permanent: ts === PERMANENT_KNOWN,
+		}));
+		const corrections = mem.corrections.map((c) => ({ ...c }));
+		const watches = mem.active_watches.map((w) => ({ ...w }));
+		return { facts, observations, transcripts, vocabulary, corrections, watches };
+	});
+}
+
+// Delete one item in `category` matching `key`. The shape of `key` depends on
+// the category (see below). Returns true when something was actually removed,
+// false when the key didn't match any entry — the renderer treats that as a
+// silent no-op rather than an error.
+export async function memory_delete_item(args: {
+	category:
+		| "fact"
+		| "observation"
+		| "transcript"
+		| "vocabulary"
+		| "correction"
+		| "watch";
+	key: string | number;
+}): Promise<boolean> {
+	return withMemory((mem) => {
+		switch (args.category) {
+			case "fact": {
+				const k = String(args.key);
+				if (!(k in mem.facts)) return false;
+				delete mem.facts[k];
+				return true;
+			}
+			case "observation": {
+				const idx = Number(args.key);
+				if (!Number.isInteger(idx) || idx < 0 || idx >= mem.recent_observations.length) return false;
+				mem.recent_observations.splice(idx, 1);
+				return true;
+			}
+			case "transcript": {
+				const idx = Number(args.key);
+				if (!Number.isInteger(idx) || idx < 0 || idx >= mem.recent_transcripts.length) return false;
+				mem.recent_transcripts.splice(idx, 1);
+				return true;
+			}
+			case "vocabulary": {
+				const word = String(args.key);
+				if (!(word in mem.vocabulary_seen)) return false;
+				delete mem.vocabulary_seen[word];
+				return true;
+			}
+			case "correction": {
+				// Corrections don't have a stable id, so we key by timestamp.
+				// Multiple corrections in the same second collapse to "delete
+				// the first matching one" — good enough; collisions are rare.
+				const ts = Number(args.key);
+				const before = mem.corrections.length;
+				const idx = mem.corrections.findIndex((c) => c.timestamp === ts);
+				if (idx === -1) return false;
+				mem.corrections.splice(idx, 1);
+				return mem.corrections.length < before;
+			}
+			case "watch": {
+				const id = String(args.key);
+				const before = mem.active_watches.length;
+				mem.active_watches = mem.active_watches.filter((w) => w.id !== id);
+				return mem.active_watches.length < before;
+			}
+			default:
+				return false;
+		}
+	});
+}
+
 export async function memory_get_context(): Promise<string> {
 	let ctx = get_context();
 	const watchesCtx = get_watches_context();

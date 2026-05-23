@@ -12,6 +12,7 @@ import * as misc from "./misc.js";
 import * as wakeWord from "./wake-word.js";
 import * as appPerms from "./app-permissions.js";
 import * as axObserver from "./ax-observer.js";
+import * as dataExport from "./data-export.js";
 
 // All IPC args arrive as plain objects from the renderer process.
 // We cast loosely since the Rust→TS port preserves the same arg shapes.
@@ -49,6 +50,9 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	memory_set_fact: (a) => memory.memory_set_fact(a as never),
 	memory_mark_known: (a) => memory.memory_mark_known(a as never),
 	memory_add_correction: (a) => memory.memory_add_correction(a as never),
+	memory_snapshot: () => memory.memory_snapshot(),
+	memory_delete_item: (a) => memory.memory_delete_item(a as never),
+	data_export: (a) => dataExport.data_export(a as never),
 	extract_session_feedback: (a) => memory.extract_session_feedback(a as never),
 	watch_add: (a) => memory.watch_add(a as never),
 	watch_remove: (a) => memory.watch_remove(a as never),

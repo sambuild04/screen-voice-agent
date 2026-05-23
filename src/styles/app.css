@@ -1697,6 +1697,172 @@ html, body, #root {
   line-height: 1.4;
 }
 
+.settings-btn-subtle {
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.55);
+  border-style: dashed;
+}
+
+.settings-link-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  margin-top: 4px;
+  background: transparent;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+  border-radius: 8px;
+  color: #67e8f9;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s, border-color 0.15s;
+}
+.settings-link-btn:hover {
+  background: rgba(6, 182, 212, 0.1);
+  border-color: rgba(6, 182, 212, 0.55);
+}
+
+.settings-export-note {
+  margin-top: 10px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+/* ── Privacy Policy panel ───────────────────────────────────────────── */
+.privacy-policy-panel {
+  max-width: 560px;
+}
+
+.privacy-policy-body {
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.78);
+  max-height: 70vh;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+.privacy-policy-body h4 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #67e8f9;
+  margin: 18px 0 8px 0;
+}
+.privacy-policy-body p { margin: 0 0 10px 0; }
+.privacy-policy-body ul { margin: 0 0 10px 16px; padding: 0; }
+.privacy-policy-body li { margin: 0 0 6px 0; }
+.privacy-policy-body code {
+  font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #cbd5e1;
+}
+.privacy-policy-body strong { color: rgba(255, 255, 255, 0.95); }
+.privacy-policy-meta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  font-style: italic;
+  margin-bottom: 16px !important;
+}
+
+/* ── Memory Browser panel ───────────────────────────────────────────── */
+.memory-browser-panel {
+  max-width: 560px;
+}
+
+.memory-browser-help {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.5;
+  margin: 0 0 14px 0;
+}
+.memory-browser-help code {
+  font-family: ui-monospace, "SF Mono", "Menlo", monospace;
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+.memory-empty {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+  padding: 24px 8px;
+}
+
+.memory-section {
+  margin-bottom: 18px;
+}
+.memory-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: rgba(255, 255, 255, 0.45);
+  margin-bottom: 6px;
+}
+.memory-section-note {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  margin: 0 0 6px 0;
+  font-style: italic;
+}
+
+.memory-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 6px;
+}
+.memory-item-text {
+  flex: 1;
+  min-width: 0;
+}
+.memory-item-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  word-break: break-word;
+  line-height: 1.4;
+}
+.memory-item-detail {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 2px;
+  word-break: break-word;
+  line-height: 1.4;
+}
+.memory-item-delete {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: 5px;
+  color: #fca5a5;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.memory-item-delete:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.2);
+}
+.memory-item-delete:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 /* Generic floating-panel fade-in used by plugin-loader's showPanel(). */
 @keyframes panel-fade-in {
   from { opacity: 0; transform: translateX(-12px) scale(0.96); }

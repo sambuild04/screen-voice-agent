@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { invoke } from "../lib/invoke-bridge";
 import type { UIPreferences } from "../hooks/useUIPreferences";
+import { PrivacyPolicy } from "./PrivacyPolicy";
+import { MemoryBrowser } from "./MemoryBrowser";
 
 type ToggleKey =
   | "privacy.screen_watch"
@@ -21,8 +23,57 @@ interface Props {
 
 export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose }: Props) {
   const [clearing, setClearing] = useState<string | null>(null);
+  const [policyOpen, setPolicyOpen] = useState(false);
+  const [memoryOpen, setMemoryOpen] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNote, setExportNote] = useState<string | null>(null);
 
   if (!visible) return null;
+
+  async function exportData(includeSecrets: boolean) {
+    if (
+      includeSecrets &&
+      !confirm(
+        "Include API keys and access tokens in the export?\n\n" +
+          "The exported file will contain your secrets in plaintext. " +
+          "Only do this if you trust the destination (e.g. an encrypted backup).",
+      )
+    ) {
+      return;
+    }
+    setExporting(true);
+    setExportNote(null);
+    try {
+      // Send the renderer-side localStorage prefs into the export so the
+      // single output file is genuinely complete (everything Samuel knows
+      // about you across both processes).
+      const localStoragePrefs: Record<string, unknown> = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        localStoragePrefs[k] = localStorage.getItem(k);
+      }
+      const result = await invoke<{
+        ok: boolean;
+        path?: string;
+        bytes?: number;
+        canceled?: boolean;
+        error?: string;
+      }>("data_export", { includeSecrets, localStoragePrefs });
+      if (result.canceled) {
+        setExportNote(null);
+      } else if (result.ok && result.path) {
+        const kb = Math.max(1, Math.round((result.bytes ?? 0) / 1024));
+        setExportNote(`Saved ${kb} KB to ${result.path}`);
+      } else if (result.error) {
+        setExportNote(`Export failed: ${result.error}`);
+      }
+    } catch (err) {
+      setExportNote(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setExporting(false);
+    }
+  }
 
   async function clearMemory() {
     if (!confirm("Clear all of Samuel's memories (preferences, vocabulary, corrections)? This cannot be undone.")) return;
@@ -188,7 +239,32 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
         </div>
 
         <div className="settings-section">
-          <div className="settings-section-title">Data Management</div>
+          <div className="settings-section-title">Your Data</div>
+
+          <button className="settings-btn" onClick={() => setMemoryOpen(true)} disabled={clearing !== null}>
+            Memory Browser…
+          </button>
+          <span className="settings-btn-desc">Inspect and delete individual memories, watches, and stored credentials</span>
+
+          <button className="settings-btn" onClick={() => exportData(false)} disabled={exporting || clearing !== null}>
+            {exporting ? "Exporting…" : "Export Data…"}
+          </button>
+          <span className="settings-btn-desc">Save everything Samuel stores about you to a JSON file (excludes API keys)</span>
+
+          <button
+            className="settings-btn settings-btn-subtle"
+            onClick={() => exportData(true)}
+            disabled={exporting || clearing !== null}
+          >
+            Export Data + API Keys…
+          </button>
+          <span className="settings-btn-desc">Same export, with secrets in plaintext — back up to an encrypted location only</span>
+
+          {exportNote && <div className="settings-export-note">{exportNote}</div>}
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">Bulk Delete</div>
 
           <button className="settings-btn" onClick={clearMemory} disabled={clearing !== null}>
             {clearing === "memory" ? "Clearing..." : "Clear Memory"}
@@ -213,21 +289,19 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
 
         <div className="settings-section">
           <div className="settings-section-title">About</div>
-          <a
-            className="settings-link"
-            href="https://github.com/nicepkg/samuel#privacy"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
+          <button className="settings-link-btn" onClick={() => setPolicyOpen(true)}>
             Privacy Policy
-          </a>
+          </button>
           <p className="settings-note">
-            All processing happens locally or via your own API keys.
-            No data is sent to third parties. Screen captures and audio
-            recordings are ephemeral and never stored permanently.
+            Voice, screen text, and tool inputs are sent to OpenAI when the
+            agent is active. Memory and credentials are stored on this
+            computer in <code>~/.samuel/</code>. Tap Privacy Policy for the
+            full breakdown.
           </p>
         </div>
       </div>
+      {policyOpen && <PrivacyPolicy onClose={() => setPolicyOpen(false)} />}
+      <MemoryBrowser visible={memoryOpen} onClose={() => setMemoryOpen(false)} />
     </div>
   );
 }
