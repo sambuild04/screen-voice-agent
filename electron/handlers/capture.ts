@@ -124,6 +124,13 @@ function getFrontmostAppName(): string {
 	}
 }
 
+// Lightweight focused-app probe for the Companion-mode boundary handler.
+// Avoids the cost of capture_active_window (full screenshot pipeline) when
+// callers only need the app name to decide whether a keystroke is safe.
+export async function get_frontmost_app(): Promise<{ app: string }> {
+	return { app: getFrontmostAppName() };
+}
+
 function findDisplayForApp(app: string): number | null {
 	const posScript = `tell application "System Events"
   try

@@ -36,6 +36,7 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	create_ephemeral_key: () => config.create_ephemeral_key(),
 
 	capture_active_window: (a) => capture.capture_active_window(a as never),
+	get_frontmost_app: () => capture.get_frontmost_app(),
 	capture_if_changed: () => capture.capture_if_changed(),
 	capture_screen_now: () => capture.capture_screen_now(),
 	capture_all_displays: () => capture.capture_all_displays(),
@@ -105,6 +106,9 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	start_watcher_audio: () => learning.start_watcher_audio(),
 	stop_watcher_audio: () => learning.stop_watcher_audio(),
 	check_watcher_audio: () => learning.check_watcher_audio(),
+	start_audio_buffer: () => learning.start_audio_buffer(),
+	stop_audio_buffer: () => learning.stop_audio_buffer(),
+	recall_audio_buffer: (a) => learning.recall_audio_buffer(a as never),
 	check_screen_for_language: (a) => learning.check_screen_for_language(a as never),
 	check_screen_text: () => learning.check_screen_text(),
 	check_audio_for_language: (a) => learning.check_audio_for_language(a as never),

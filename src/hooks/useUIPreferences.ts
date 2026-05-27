@@ -6,7 +6,7 @@ const STORAGE_VERSION_KEY = "samuel-ui-prefs-version";
 // to users still on the previous default. The migration step in `loadPrefs`
 // only nudges keys whose saved value matches the OLD default — explicit
 // customizations are preserved.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // ── Schema-driven UI preferences ──────────────────────────────────────────
 // Every adjustable property is declared once here. The schema drives state
@@ -130,19 +130,23 @@ const SCHEMA: Record<string, PropSchema> = {
 
   // ── Privacy (non-visual but voice-toggleable) ──
   // Two scopes:
-  //   • "proactive" toggles (screen_watch, audio_listen) — default OFF.
-  //     Gate the ambient watcher + learning loops only. Opt-in.
+  //   • "proactive" toggles (screen_watch, audio_listen) — default ON for
+  //     a frictionless first-run experience. The model's listen_in_background
+  //     and set_screen_observation(mode='continuous') tools are still marked
+  //     `needsApproval: true`, so any time these flip OFF and need to come
+  //     back on, the user sees an explicit allow/deny popup. Settings panel
+  //     toggles remain the manual override path for revoking permanently.
   //   • "tool" master switches (screen_read, voice_input, computer_use) —
   //     default ON. Gate the tools the model can call during a turn.
   //     Flipping one off is a master kill-switch for that capability;
   //     enforced in src/lib/samuel-privacy.ts + tool execute() guards
   //     in src/lib/samuel.ts.
   "privacy.screen_watch": {
-    type: "boolean", default: false,
+    type: "boolean", default: true,
     aliases: ["privacy.screen_watch_enabled", "privacy.screen"],
   },
   "privacy.audio_listen": {
-    type: "boolean", default: false,
+    type: "boolean", default: true,
     aliases: ["privacy.audio_listen_enabled", "privacy.audio", "privacy.microphone"],
   },
   "privacy.screen_read": {
@@ -199,6 +203,14 @@ const DEFAULT_UPGRADES: Array<{ forVersion: number; key: string; oldDefault: num
   // a large gap between the window edge and the cat sprite; the new default
   // closes that gap. See useUIPreferences SCHEMA "avatar.size".
   { forVersion: 2, key: "avatar.size", oldDefault: 320 },
+  // v3 (2026-05): privacy.audio_listen and privacy.screen_watch default
+  // OFF → ON. These now have explicit needsApproval popups via
+  // listen_in_background / set_screen_observation, so the safer default
+  // is permissive — users who never opted in still see the approval card
+  // before any sensitive action, but the buffer / continuous-watch are
+  // available the moment they click Allow without a settings hunt.
+  { forVersion: 3, key: "privacy.audio_listen", oldDefault: false },
+  { forVersion: 3, key: "privacy.screen_watch", oldDefault: false },
 ];
 
 function loadPrefs(): UIPreferences {

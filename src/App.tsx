@@ -5,6 +5,7 @@ import { useRealtime } from "./hooks/useRealtime";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useRecordMode } from "./hooks/useRecordMode";
 import { useLearningMode } from "./hooks/useLearningMode";
+import { useAudioBuffer } from "./hooks/useAudioBuffer";
 import { useWatcherLoop } from "./hooks/useWatcherLoop";
 import { useUIPreferences } from "./hooks/useUIPreferences";
 import { playChime, playSleep } from "./lib/sounds";
@@ -43,6 +44,14 @@ export default function App() {
     ui.prefs["privacy.screen_watch"] as boolean,
     ui.prefs["privacy.audio_listen"] as boolean,
   );
+
+  // Ambient audio buffer — the pull-model "I've been listening, ask me
+  // anything" primitive. Continuously records system audio while connected
+  // (local-only; transcription is consent-at-point-of-use via the model's
+  // recall_audio tool). Gated by privacy.audio_listen — the model's
+  // listen_in_background tool flips that pref and is marked needsApproval
+  // so the user sees a clear allow/deny popup the first time.
+  useAudioBuffer(status, ui.prefs["privacy.audio_listen"] as boolean);
 
   // Standalone watcher loop: evaluates triggers even when learning mode is off.
   // Defers to useLearningMode when it's active (avoids double-evaluation).

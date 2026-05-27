@@ -20,6 +20,9 @@ const TOOL_DESCRIPTIONS: Record<string, string> = {
 	set_system_volume: "Change system volume",
 	native_computer_action: "Perform a computer action (click/type)",
 	computer_use: "Operate your computer (see, click, type)",
+	listen_in_background: "Listen to system audio (so I can answer questions about what you're playing)",
+	set_screen_observation: "Watch your screen continuously (so I can follow along with what you're doing)",
+	file_op: "Read or write a file on your computer",
 };
 
 const TOOL_ICONS: Record<string, string> = {
@@ -41,11 +44,24 @@ const TOOL_ICONS: Record<string, string> = {
 	set_system_volume: "🔊",
 	native_computer_action: "⚡",
 	computer_use: "🖱",
+	listen_in_background: "🎧",
+	set_screen_observation: "👀",
+	file_op: "📁",
 };
 
 // Tools that operate on specific apps — eligible for "Always Allow" per-app memory
 const APP_SCOPED_TOOLS = new Set([
 	"read_app", "read_app_content", "cua_run_native", "computer_use", "open_app",
+]);
+
+// Sensitive permissions where we should NOT auto-approve after the
+// 10-second countdown — the user has to consciously click Allow. Privacy
+// grants like ambient audio capture or continuous screen observation
+// would otherwise silently flip on if the user happened to be away from
+// the screen when the popup landed.
+const NO_AUTO_APPROVE = new Set([
+	"listen_in_background",
+	"set_screen_observation",
 ]);
 
 interface Props {
@@ -79,17 +95,21 @@ export function ToolApprovalCard({ entry, onApprove, onDeny, onAlwaysAllow, onAl
 				.join("\n")
 		: null;
 
-	// Auto-approve after 10s if user doesn't interact
+	// Auto-approve after 10s if user doesn't interact — disabled for
+	// sensitive privacy permissions (audio capture, continuous screen
+	// observation), which require an explicit Allow click.
+	const autoApprove = !NO_AUTO_APPROVE.has(toolName);
 	const [countdown, setCountdown] = useState(10);
 	useEffect(() => {
 		if (state !== "pending") return;
+		if (!autoApprove) return;
 		if (countdown <= 0) {
 			onApprove(entry.id);
 			return;
 		}
 		const t = setTimeout(() => setCountdown((c) => c - 1), 1000);
 		return () => clearTimeout(t);
-	}, [countdown, state, entry.id, onApprove]);
+	}, [countdown, state, entry.id, onApprove, autoApprove]);
 
 	if (state === "approved") {
 		return (
@@ -149,7 +169,7 @@ export function ToolApprovalCard({ entry, onApprove, onDeny, onAlwaysAllow, onAl
 					className="tool-approval-btn tool-approval-btn-approve"
 					onClick={() => onApprove(entry.id)}
 				>
-					Allow{countdown < 10 ? ` (${countdown}s)` : ""}
+					Allow{autoApprove && countdown < 10 ? ` (${countdown}s)` : ""}
 				</button>
 				{isAppScoped && onAlwaysAllow && (
 					<button

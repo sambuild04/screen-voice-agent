@@ -41,6 +41,23 @@ type SetScreenObservationFn = (mode: ScreenObservationMode, opts?: ScreenObserva
 type DiscardLastTurnFn = (reason: string) => { removed: number; cancelled: boolean };
 type InjectCorrectionFn = (lesson: string) => void;
 
+/**
+ * Ambient audio buffer — pull-model replacement for the old "Companion
+ * mode" push loop. When active, ScreenCaptureKit records system audio
+ * continuously into a rolling on-disk buffer (no transcription cost
+ * while idle). When the user asks anything about audio they just
+ * played ("translate the last 30 seconds", "what did they say?",
+ * "teach me the words from that clip"), the model calls the
+ * `recall_audio` tool and the buffer is flushed + transcribed on
+ * demand.
+ *
+ * The bridge surface is deliberately minimal: just an active toggle.
+ * Retention/window choices live entirely in the IPC layer (the helper
+ * keeps a single rolling m4a; ffmpeg trims the tail at recall time).
+ */
+type SetAudioBufferActiveFn = (active: boolean) => void;
+type AudioBufferStateFn = (active: boolean) => void;
+
 let sendImageFn: SendImageFn | null = null;
 let sendTextFn: SendTextFn | null = null;
 let screenTargetFn: ScreenTargetFn | null = null;
@@ -54,6 +71,8 @@ let setPassiveListeningFn: SetPassiveListeningFn | null = null;
 let setScreenObservationFn: SetScreenObservationFn | null = null;
 let discardLastTurnFn: DiscardLastTurnFn | null = null;
 let injectCorrectionFn: InjectCorrectionFn | null = null;
+let setAudioBufferActiveFn: SetAudioBufferActiveFn | null = null;
+let audioBufferStateFn: AudioBufferStateFn | null = null;
 
 export function registerDiscardLastTurn(fn: DiscardLastTurnFn | null) {
   discardLastTurnFn = fn;
@@ -324,4 +343,37 @@ export function notifyPluginBuildProgress(progress: PluginBuildProgress | null) 
 
 export function getCurrentProposal(): PluginProposal | null {
   return currentProposal;
+}
+
+// ---------------------------------------------------------------------------
+// Ambient audio buffer bridge
+// ---------------------------------------------------------------------------
+
+export function registerSetAudioBufferActive(fn: SetAudioBufferActiveFn | null) {
+  setAudioBufferActiveFn = fn;
+}
+
+/**
+ * Toggle the ambient system-audio buffer. When `true`, ScreenCaptureKit
+ * runs continuously and the model's `recall_audio` tool can flush +
+ * transcribe whatever has accumulated. When `false`, capture stops and
+ * `recall_audio` returns empty.
+ *
+ * Returns `true` if a hook is registered (i.e. there's a live UI). When
+ * the renderer isn't running, the call is a no-op so background tools
+ * don't crash.
+ */
+export function setAudioBufferActive(active: boolean): boolean {
+  if (!setAudioBufferActiveFn) return false;
+  setAudioBufferActiveFn(active);
+  return true;
+}
+
+export function registerAudioBufferState(fn: AudioBufferStateFn | null) {
+  audioBufferStateFn = fn;
+}
+
+/** Surface the audio buffer's running state to UI chrome. */
+export function notifyAudioBufferState(active: boolean) {
+  audioBufferStateFn?.(active);
 }

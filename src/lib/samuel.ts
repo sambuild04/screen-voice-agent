@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "./invoke-bridge";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection, setAudioBufferActive, applyUIUpdate } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 import { privacy, privacyBlockError } from "./samuel-privacy";
 
@@ -683,6 +683,13 @@ const setListeningModeTool = tool({
 
 const setScreenObservationTool = tool({
   name: "set_screen_observation",
+  // Continuous screen observation requires user approval the first time
+  // it's enabled per session — same consent surface as listen_in_background.
+  // on_demand and continuous→on_demand transitions don't need approval.
+  needsApproval: async (
+    _ctx,
+    args: { mode?: string; app?: string },
+  ) => args?.mode === "continuous",
   description:
     "Switch how Samuel sees the user's screen.\n\n" +
     "Modes:\n" +
@@ -732,6 +739,18 @@ const setScreenObservationTool = tool({
   execute({ mode, app, reason }) {
     if (mode !== "on_demand" && mode !== "continuous") {
       return toolErr("invalid_input", `Invalid mode: ${mode}. Use 'on_demand' or 'continuous'.`);
+    }
+    // When the user grants continuous observation via the approval popup,
+    // persist their consent so the broader screen-watch surface (watcher
+    // triggers, learning-mode screen pushes) also turns on. Idempotent
+    // when already true.
+    if (mode === "continuous") {
+      try {
+        applyUIUpdate("privacy", "screen_watch", "true");
+      } catch {
+        // Best-effort; the on-screen toggle is recoverable from settings
+        // even if the bridge isn't registered.
+      }
     }
     const ok = setScreenObservation(mode, { app, reason });
     if (!ok) {
@@ -865,6 +884,148 @@ const setLearningLanguageTool = tool({
     return toolOk("Learning mode off.", { language: null });
   },
 });
+
+// ---------------------------------------------------------------------------
+// Ambient Audio Buffer — pull-model "I've been listening, ask me anything".
+//
+// Replaces the previous Companion-mode push loop. ScreenCaptureKit captures
+// system audio (whatever's playing through the user's speakers) into a
+// rolling on-disk buffer whenever `listen_in_background` is on. The model
+// stays silent until the user asks something about it; then `recall_audio`
+// flushes + transcribes the buffer (optionally trimmed to the last N
+// seconds via ffmpeg) and returns the transcript so the model can answer
+// the user's question normally.
+//
+// Why pull instead of push:
+// - The user's question IS the boundary. No fragile semantic_vad / poll
+//   cadence guessing where lines end.
+// - No mic-bleed cancellation (the model never auto-reacts to the buffer).
+// - User keeps full playback control — no keystroke fights.
+// - One primitive answers any question shape: translate, teach grammar,
+//   recall lyrics, summarize a meeting, identify a song, etc.
+// - Zero transcription cost while idle; pay only on recall.
+// ---------------------------------------------------------------------------
+
+const listenInBackgroundTool = tool({
+  name: "listen_in_background",
+  // active=true requires user approval (system-audio capture consent).
+  // active=false is just turning recording OFF — no approval needed,
+  // and we shouldn't block the user from disabling capture quickly.
+  needsApproval: async (_ctx, args: { active?: boolean }) => args?.active === true,
+  description:
+    "Enable or disable the ambient system-audio buffer (records what's playing through your speakers " +
+    "into a rolling local-only file so recall_audio can answer questions about what was just played).\n\n" +
+    "When you call this with active=true, the user sees an approval popup and clicks Allow or Deny. On " +
+    "Allow, the choice persists across sessions — they don't get prompted again. On Deny, capture stays " +
+    "off and you should respect that and not re-prompt.\n\n" +
+    "WHEN TO CALL active=true:\n" +
+    "- recall_audio returned reason='buffer_off' (the most common case at first install).\n" +
+    "- 'turn on audio listening' / 'start listening to my speakers' / 'enable audio capture'.\n" +
+    "Don't ask the user verbally first — the approval popup IS the consent UI. Just call it.\n\n" +
+    "WHEN TO CALL active=false:\n" +
+    "- 'stop listening to my speakers' / 'turn off the audio capture' / 'I'm done with audio'.\n\n" +
+    "DO NOT call this every time the user asks about audio — that's recall_audio's job.",
+  parameters: z.object({
+    active: z
+      .boolean()
+      .describe("true to enable the rolling system-audio buffer; false to stop and clear it."),
+  }),
+  execute({ active }) {
+    // Persist the choice so it survives session restarts.
+    let prefResult: string | undefined;
+    try {
+      prefResult = applyUIUpdate("privacy", "audio_listen", active ? "true" : "false");
+    } catch (e) {
+      return toolErr("system_error", `Could not flip audio_listen: ${e}`);
+    }
+    // Also nudge the per-session bridge so the hook flips immediately
+    // (the privacy-pref change handles it via the React effect, but
+    // this is belt-and-suspenders for the same render frame).
+    setAudioBufferActive(active);
+    return toolOk(
+      active
+        ? "Audio capture is on now, sir. The buffer just started — replay the bit you wanted me to hear and ask me again."
+        : "Stopped listening to your speakers.",
+      { active, ui_result: prefResult },
+    );
+  },
+});
+
+const recallAudioTool = tool({
+  name: "recall_audio",
+  description:
+    "Fetch the transcript of system audio that was just played through the speakers. Call this any time " +
+    "the user asks about audio they heard — translation, vocabulary, lyrics, meeting recall, summary, etc.\n\n" +
+    "USAGE PATTERNS:\n" +
+    "- 'what did they just say?' → recall_audio(last_seconds=15)\n" +
+    "- 'translate the last 30 seconds' → recall_audio(last_seconds=30)\n" +
+    "- 'teach me each word from that clip' → recall_audio(last_seconds=30 or whatever they said)\n" +
+    "- 'what was the chorus?' → recall_audio(last_seconds=60)\n" +
+    "- 'summarize the meeting so far' → recall_audio(last_seconds=300)\n\n" +
+    "TIME WINDOW GUIDE: pick a sensible duration from the question, don't make the user specify exact " +
+    "seconds:\n" +
+    "  'just now' / 'that' / 'what they said' → 10-15s\n" +
+    "  'the last clip' / 'that scene' / 'last paragraph' → 30s\n" +
+    "  'the chorus' / 'the last few lines' → 60s\n" +
+    "  'the conversation so far' / 'the meeting' → 180-300s\n\n" +
+    "AFTER YOU CALL THIS — interpret the `reason` field:\n" +
+    "- 'ok': transcript is valid. Use it as context to answer the user's question (translate, teach, " +
+    "summarize). Don't dump the raw transcript unless they asked for it verbatim.\n" +
+    "- 'buffer_off': capture isn't running. Just call listen_in_background(active=true) — the " +
+    "approval popup IS the consent UI, you don't need to verbally ask first. Once the user clicks " +
+    "Allow, the buffer turns on but is still empty (it just started), so tell them to replay the " +
+    "clip and ask again. If the user denies, accept it ('Acknowledged, sir, I won't record system " +
+    "audio') and don't re-prompt.\n" +
+    "- 'no_capture' / 'no_speech': buffer was on but nothing useful came through. 'I didn't pick up " +
+    "audio in that window — check that audio is routed to speakers (Bluetooth/headphones may be " +
+    "bypassing capture) and replay it.'\n" +
+    "- 'filtered_short' / 'filtered_hallucination' / 'filtered_self_voice': 'I heard something but " +
+    "couldn't transcribe it cleanly — could be background music, unclear speech, or my own voice " +
+    "bleeding in. Try replaying that bit.'\n" +
+    "- 'empty_transcript': 'The audio came through but the transcriber found no speech — likely music " +
+    "or non-speech audio.'\n" +
+    "- 'no_api_key': 'I can't transcribe right now — no OpenAI API key configured. Check settings.'\n" +
+    "- 'busy' / 'transcribe_error': retry once after a short pause; if it fails again, say so honestly.\n" +
+    "- duration_ms much smaller than last_seconds*1000 (≲30%): mention it: 'I only have N seconds " +
+    "buffered, here's what I heard…'\n\n" +
+    "DO NOT auto-recall on a timer or every turn — only when the user actually asks about audio.",
+  parameters: z.object({
+    last_seconds: z
+      .number()
+      .describe(
+        "Window size in seconds. Pick from the question: 'what just happened' → 15, 'last clip' → 30, " +
+        "'the chorus / last paragraph' → 60, 'the meeting so far' → 180-300. If the user gives an exact " +
+        "number, use it.",
+      ),
+  }),
+  async execute({ last_seconds }) {
+    if (!Number.isFinite(last_seconds) || last_seconds <= 0) {
+      return toolErr("invalid_input", "last_seconds must be a positive number.");
+    }
+    if (last_seconds > 1800) {
+      return toolErr("invalid_input", "last_seconds is capped at 1800 (30 minutes).");
+    }
+    try {
+      const result = await invoke<{
+        transcript: string;
+        duration_ms: number;
+        filtered: boolean;
+        reason: string;
+      }>("recall_audio_buffer", { last_seconds });
+      return toolOk("Recall complete.", {
+        transcript: result.transcript ?? "",
+        duration_ms: result.duration_ms ?? 0,
+        filtered: !!result.filtered,
+        reason: result.reason ?? "ok",
+        requested_seconds: last_seconds,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return toolErr("system_error", `recall_audio failed: ${msg}`);
+    }
+  },
+});
+
 
 // ---------------------------------------------------------------------------
 // Desktop Interaction (click, type, key, scroll, focus, press-element)
@@ -2802,10 +2963,52 @@ Background monitoring (audio transcripts, registered watchers, plus continuous-m
 
 Recording: recording(action="start") → user plays content → recording(action="stop"). Transcript arrives as [System: Recording transcript ready...]. Do NOT auto-analyze the transcript — wait for user instructions. While a recording is active, you're capturing on the user's behalf — DO NOT call recording(action="stop") unless the user EXPLICITLY says a stop verb (stop, that's enough, okay you got it, cut, end the recording). Background fragments, ambient bleed, and prompt-regurgitated transcripts are NOT a stop signal. Recordings shorter than ~5 seconds almost always mean you stopped too early; if your last action was recording('start') and you're about to call recording('stop'), recheck whether the user actually asked for it.
 
-# What Samuel Hears — and what he doesn't
-You only "hear" through the user's microphone. The realtime model never gets a direct feed of system audio (whatever's playing on YouTube, Spotify, a video call). System audio only reaches you indirectly, when the laptop speakers are loud enough for the mic to pick it up — that's unreliable for music, quiet dialogue, or when the user wears headphones.
+# What Samuel Hears — mic + ambient audio buffer
+You hear two channels: (1) the user's microphone in real time, and (2) — if the ambient audio buffer is on — system audio (whatever's playing through the speakers) is being recorded into a rolling on-disk buffer. The realtime model never receives the buffer as a stream; it stays silent context until the user asks something about it, at which point you call recall_audio to flush + transcribe the relevant window.
 
-If the user asks "did you hear that song / video / call?" and you have no audio context for it, do NOT just say "no, I didn't hear it" and stop. Explain the limitation in one short sentence and offer the recording feature: "I didn't pick that up cleanly through the mic, sir. Want me to record so I can analyze it next time?" — then if they agree, call recording(action="start") and they replay it. The recording tool uses ScreenCaptureKit to capture system audio directly, which works regardless of speaker volume or headphones.
+If the user asks "did you hear that song / video / call?" and the buffer has it, call recall_audio(last_seconds=...). If the buffer is off (listen_in_background(active=false) was called, or audio-listening privacy is disabled), say so in one short sentence and offer to turn it on or use the recording tool to capture a specific clip.
+
+# Ambient Audio Buffer — listen continuously, answer on demand
+The buffer is the right primitive for ANY "what did they just say / play / sing?" question. Language learning from videos, lyrics retrieval, meeting recall, podcast comprehension, gameplay commentary, song identification — all the same shape: user plays audio, user asks, you call recall_audio, you answer.
+
+DEFAULT STATE: OFF at first install (privacy-respecting). The user has to consent once before the buffer starts capturing. After they enable it via listen_in_background(true), the preference persists across sessions, so future questions just work. If recall_audio comes back with reason='buffer_off', that's the cue to ask the user for consent.
+
+WHEN THE USER ASKS:
+- "what did they just say?" → recall_audio(last_seconds=15), then translate/summarize.
+- "translate the last 30 seconds" → recall_audio(last_seconds=30), translate line by line.
+- "teach me each word from that clip" → recall_audio(last_seconds=N), break down vocabulary.
+- "what was the chorus?" → recall_audio(last_seconds=60), pull the repeating lyric.
+- "summarize this meeting so far" → recall_audio(last_seconds=300), summarize.
+- "what's the grammar in that sentence?" → recall_audio(last_seconds=10), explain grammar.
+
+TIME WINDOW HEURISTIC (so you never have to ask the user for exact seconds):
+- "just now" / "that" / "what they said" → 10–15s
+- "the last clip" / "that scene" / "last paragraph" → 30s
+- "the chorus" / "the last few lines" → 60s
+- "the meeting / conversation so far" → 180–300s
+
+WHEN NOT TO CALL RECALL:
+- The user is asking about THEIR speech (mic), not system audio — answer directly from the live conversation.
+- Single-shot text/screen questions ("translate this line on the screen") — read_app or observe_screen, not recall.
+- "pause the video" / "play the song" — that's a desktop_key('k') call, nothing to do with the buffer.
+- Don't auto-recall on a timer or every turn. The buffer is on so you CAN answer questions, not so you start narrating.
+
+DEACTIVATION:
+- "stop listening to my speakers" / "turn off the audio capture" / "I'm done with audio" → listen_in_background(active=false). One short ack and silence.
+- "turn it back on" / "start listening again" → listen_in_background(active=true).
+
+USER PLAYBACK CONTROL:
+- The user controls play/pause. You do NOT pause their video unless they explicitly say to. The pull-model assumption is: user plays, user pauses at the moment they want to ask, user asks, you recall. Never press K on your own to "help."
+
+INTERPRETING RECALL RESULTS — read the reason field, not just transcript:
+- reason="ok": you have a transcript; answer the user's question with it.
+- reason="buffer_off": capture isn't running (audio_listen privacy is off). Just call listen_in_background(active=true) — that triggers an in-app approval popup the user clicks Allow/Deny. You do NOT need to verbally ask consent first. After Allow, the buffer just started so it's empty; tell the user to replay the clip and ask again. If they deny, accept it and don't re-prompt.
+- reason="no_capture" / "no_speech": buffer is on but nothing came through. Likely Bluetooth/headphones bypassing ScreenCaptureKit, or no audio playing. Tell the user to check audio routing.
+- reason starting with "filtered_": audio was heard but rejected as artifact (too short, hallucination, or self-voice bleed). Suggest replaying.
+- reason="empty_transcript": audio came through but had no speech (music-only, sound effects).
+- reason="no_api_key": tell the user to check API key in settings.
+- reason="busy" / "transcribe_error": retry once; if it fails again, surface the failure.
+- duration_ms much smaller than asked (<30%): mention it honestly — "I only have N seconds buffered, here's what I heard…"
 
 # General
 - Be concise. Every word costs the user's time.
@@ -2882,6 +3085,8 @@ export const samuelAgent = new RealtimeAgent({
     discardLastTurnTool,
     waitForUserTool,
     setLearningLanguageTool,
+    listenInBackgroundTool,
+    recallAudioTool,
     // Desktop interaction — PRIMARY (no takeover) first, FALLBACK after
     axTypeTool,
     pressElementTool,

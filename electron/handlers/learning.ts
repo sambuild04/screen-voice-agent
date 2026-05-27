@@ -893,6 +893,202 @@ export async function stop_watcher_audio(): Promise<void> {
 	await releaseAudioCapture("watcher");
 }
 
+// Ambient-buffer consumer — used by the pull-model `recall_audio` tool. The
+// app keeps a continuous ScreenCaptureKit recording running whenever this
+// consumer is acquired; the recall tool flushes + transcribes on demand.
+// Independent slot from `learning` and `watcher` so their refcounted
+// lifecycles don't interfere.
+export async function start_audio_buffer(): Promise<void> {
+	acquireAudioCapture("buffer");
+}
+
+export async function stop_audio_buffer(): Promise<void> {
+	await releaseAudioCapture("buffer");
+}
+
+// Trim the tail of an m4a to keep only the most recent `seconds` of audio.
+// Uses ffmpeg's `-sseof` (seek from end of file). Returns the trimmed file
+// path on success, or the original path on failure (best-effort).
+function tailTrimAudio(srcPath: string, seconds: number): string {
+	const trimmedPath = `${srcPath}.tail.m4a`;
+	try {
+		execFileSync("ffmpeg", [
+			"-y",
+			"-sseof", `-${seconds}`,
+			"-i", srcPath,
+			"-c", "copy",
+			trimmedPath,
+		], { stdio: "ignore" });
+		if (existsSync(trimmedPath) && statSync(trimmedPath).size > 1000) {
+			return trimmedPath;
+		}
+	} catch {
+		// fall through — return original
+	}
+	tryRemove(trimmedPath);
+	return srcPath;
+}
+
+// Reasons recall_audio_buffer can return. Surfaced so the model can give
+// actionable per-cause guidance instead of generic "no audio" messages.
+export type RecallReason =
+	| "ok"               // got a valid transcript
+	| "buffer_off"       // buffer consumer not acquired (privacy off, hook not running, etc.)
+	| "busy"             // another check is in flight or recording is active
+	| "no_api_key"       // OpenAI API key not configured
+	| "no_capture"       // helper produced no file or a tiny one (silent / not capturing)
+	| "no_speech"        // file had data but RMS energy was below the speech floor
+	| "empty_transcript" // transcribed but the model returned no text
+	| "filtered_short"   // transcript was 1-4 chars, likely an artifact
+	| "filtered_hallucination"
+	| "filtered_self_voice"
+	| "transcribe_error";
+
+export interface RecallAudioResult {
+	transcript: string;
+	duration_ms: number;
+	filtered: boolean;
+	reason: RecallReason;
+}
+
+// Pull-model recall: flushes the ScreenCaptureKit recording, optionally
+// trims to the last N seconds, transcribes via gpt-4o-transcribe, and
+// returns the transcript. The capture restarts immediately so the next
+// recall covers fresh audio. Designed to be called by the model in
+// response to user questions like "translate the last 30 seconds" or
+// "what did they just say?"
+export async function recall_audio_buffer(args: {
+	last_seconds?: number;
+}): Promise<RecallAudioResult> {
+	const make = (
+		reason: RecallReason,
+		extra?: Partial<RecallAudioResult>,
+	): RecallAudioResult => ({
+		transcript: "",
+		duration_ms: 0,
+		filtered: false,
+		reason,
+		...extra,
+	});
+
+	if (audioCheckInFlight) return make("busy");
+	if (recordingChild) return make("busy");
+	if (!audioConsumers.has("buffer")) {
+		// Buffer never acquired — most likely cause is privacy.audio_listen
+		// is OFF (the renderer hook gates on it). Surface this distinctly
+		// so the tool layer can prompt the user to enable it.
+		console.error("[recall-audio] buffer consumer not acquired — privacy.audio_listen probably off");
+		return make("buffer_off");
+	}
+
+	const config = readConfigInternal();
+	const apiKey = config.apiKey;
+	if (!apiKey) return make("no_api_key");
+
+	audioCheckInFlight = true;
+	try {
+		await stopLearningAudioInternal();
+
+		if (!existsSync(LEARNING_AUDIO_PATH)) {
+			startLearningAudioInternal();
+			return make("no_capture");
+		}
+
+		const size = statSync(LEARNING_AUDIO_PATH).size;
+		if (size < 8000) {
+			tryRemove(LEARNING_AUDIO_PATH);
+			startLearningAudioInternal();
+			return make("no_capture");
+		}
+
+		// Trim to requested window if specified. ffprobe-free duration probe:
+		// the helper uses AAC at ~48 kbps mono, so size/6000 gives a rough
+		// seconds estimate. Only trim when we've clearly accumulated MORE
+		// than the requested window, otherwise we'd be re-transcribing
+		// the whole buffer for nothing.
+		let pathToTranscribe = LEARNING_AUDIO_PATH;
+		const lastSeconds = args.last_seconds && args.last_seconds > 0
+			? args.last_seconds
+			: 0;
+		const approxBufferedSeconds = size / 6000;
+		if (lastSeconds > 0 && approxBufferedSeconds > lastSeconds + 5) {
+			pathToTranscribe = tailTrimAudio(LEARNING_AUDIO_PATH, lastSeconds);
+		}
+
+		if (!audioHasSpeechEnergy(pathToTranscribe)) {
+			tryRemove(LEARNING_AUDIO_PATH);
+			if (pathToTranscribe !== LEARNING_AUDIO_PATH) tryRemove(pathToTranscribe);
+			startLearningAudioInternal();
+			return make("no_speech");
+		}
+
+		console.error(`[recall-audio] transcribing ${(size / 1024).toFixed(1)}KB${lastSeconds ? ` (last ${lastSeconds}s)` : ""}...`);
+
+		let whisperBody: unknown;
+		try {
+			whisperBody = await transcribeFile(
+				apiKey, pathToTranscribe, "gpt-4o-transcribe",
+				"Transcribe spoken dialogue accurately. There may be background music or sound effects — focus on the spoken words. If there is no speech, return empty.",
+			);
+		} catch (err) {
+			console.error(`[recall-audio] transcribe failed: ${err instanceof Error ? err.message : err}`);
+			tryRemove(LEARNING_AUDIO_PATH);
+			if (pathToTranscribe !== LEARNING_AUDIO_PATH) tryRemove(pathToTranscribe);
+			startLearningAudioInternal();
+			return make("transcribe_error");
+		}
+
+		// Estimate transcribed duration. We use the trimmed file size when
+		// applicable so the model knows how much it actually got.
+		let durationMs = 0;
+		try {
+			const transcribedSize = statSync(pathToTranscribe).size;
+			durationMs = Math.round((transcribedSize / 6000) * 1000);
+		} catch {
+			// ignore
+		}
+
+		tryRemove(LEARNING_AUDIO_PATH);
+		if (pathToTranscribe !== LEARNING_AUDIO_PATH) tryRemove(pathToTranscribe);
+		startLearningAudioInternal();
+
+		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+		const raw = ((whisperBody as any).text ?? "").trim();
+		if (!raw) {
+			console.error("[recall-audio] empty transcript");
+			return make("empty_transcript", { duration_ms: durationMs });
+		}
+
+		// We're more permissive than the polling-based learning loop: the
+		// hallucination floor is lowered to ≤4 chars (some legit Japanese
+		// utterances are 5-8 chars) and self-voice/hallucination flags are
+		// surfaced rather than silently swallowed, so the model can decide
+		// whether to retry, ask the user, or explain the limitation.
+		const charCount = [...raw].length;
+		if (charCount <= 4) {
+			console.error(`[recall-audio] filtered (too short): ${truncateStr(raw, 80)}`);
+			return make("filtered_short", { duration_ms: durationMs, filtered: true });
+		}
+
+		if (isWhisperHallucination(raw)) {
+			console.error(`[recall-audio] filtered hallucination: ${truncateStr(raw, 80)}`);
+			return make("filtered_hallucination", { duration_ms: durationMs, filtered: true });
+		}
+		if (isSelfVoice(raw)) {
+			console.error(`[recall-audio] filtered self-voice: ${truncateStr(raw, 80)}`);
+			return make("filtered_self_voice", { duration_ms: durationMs, filtered: true });
+		}
+
+		console.error(`[recall-audio] transcript (${durationMs}ms): ${truncateStr(raw, 160)}`);
+		return { transcript: raw, duration_ms: durationMs, filtered: false, reason: "ok" };
+	} catch (err) {
+		console.error(`[recall-audio] failed: ${err instanceof Error ? err.message : err}`);
+		return make("transcribe_error");
+	} finally {
+		audioCheckInFlight = false;
+	}
+}
+
 // Language-agnostic chunk read for the watcher loop. Strips the learning-mode
 // language filter + vocab-hint generation since watch triggers can fire on
 // any audio content (errors, voice tone, generic phrases, foreign-language

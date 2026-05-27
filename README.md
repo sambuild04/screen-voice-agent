@@ -17,6 +17,8 @@ An always-on voice AI desktop assistant for macOS that can use your screen and a
 
 ## What's New
 
+- **Ambient audio buffer + on-demand recall** — Samuel records system audio into a rolling local-only buffer the moment the session connects. When you ask "translate the last 30 seconds" / "what did they just say?" / "teach me the words from that clip", he calls `recall_audio(last_seconds=N)`, ffmpeg-trims the tail of the buffer to your window, transcribes it via `gpt-4o-transcribe`, and answers. No polling cadence to fight, no auto-pause/resume — *you* control playback, *your question* is the boundary.
+- **In-app consent popups for sensitive privacy surfaces** — `listen_in_background` and `set_screen_observation(mode='continuous')` are now `needsApproval: true`. The first time either flips on (from off) Samuel surfaces a tool-approval card with `Allow` / `Deny` and **no auto-approve countdown** for these two — you have to consciously click Allow. On Allow, the choice persists across sessions via `privacy.audio_listen` / `privacy.screen_watch`. Settings panel toggles remain the manual override.
 - **Smart context decisions** — Samuel now decides per-turn whether your screen is even relevant before capturing it. Acks ("yes", "thanks"), command-intent ("open Slack in the browser"), service mentions ("check my Gmail"), and meta-questions ("what can you do?") skip the AX-tree read + screenshot entirely. Saves ~1.3s of latency and ~150 KB of tokens per turn.
 - **"That wasn't me"** — say "that's not my voice", "ignore that last one", or "I didn't say that" and Samuel erases the bogus user turn AND any reply to it from session memory + UI. Side effects (tab switches, key presses) get a verbal "want me to revert?" offer.
 - **Listening modes** — say "I'm watching anime, ignore the audio" and Samuel goes passive (only responds when addressed by name). Audio is still captured silently so you can later ask "what did they just say?".
@@ -125,11 +127,48 @@ Triggers are first-class objects with cooldowns, enable/disable, fire counts, an
 Samuel can run continuous perception when you enable it and use ambient features:
 
 - **Screen** — with learning language / ambient mode, periodic vision passes (on an interval) plus smart change detection; on each voice turn, AX + screenshot may refresh when relevant (see Smart Context below — many turns skip capture).
-- **Audio** — system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice when configured)
+- **Audio** — system audio via ScreenCaptureKit with PID-level filtering (excludes his own voice when configured), feeding both the ambient triggers and the on-demand recall buffer (see Ambient Audio Buffer below).
 - **Context injection** — observations can be fed silently when privacy toggles allow
 - **Watcher loop** — evaluates active triggers against audio/screen events, may fire synthetic turns to speak proactively
 
-Screen and audio are **not** on unconditionally: use the settings toggles for screen watch and audio listen, and expect lower capture frequency when smart context skips a turn.
+Screen and audio are **not** on unconditionally: use the settings toggles for screen watch and audio listen, and expect lower capture frequency when smart context skips a turn. Sensitive privacy surfaces also flow through an explicit allow/deny popup the first time they flip on (see Consent Popups below).
+
+### Ambient Audio Buffer — "I've Been Listening, Ask Me Anything"
+
+Once audio listening is allowed, Samuel keeps a rolling system-audio buffer running locally — anything playing through your speakers gets recorded into a small on-disk file with no transcription cost. The model never sees the buffer as a stream; it stays silent context until *you* ask about it.
+
+```
+You:     *plays a Japanese anime clip → pauses*
+You:     "Translate the last 30 seconds and teach me each word."
+Samuel:  *calls recall_audio(last_seconds=30)*
+         "They said 高遠寺パイセン、あんた強いんだって? 俺とやり合おうぜ — 'Hey
+          senior Takadōji, I hear you're strong. Let's spar.' 強い (tsuyoi) is
+          'strong'; パイセン is slang for 先輩…"
+```
+
+How it differs from the older companion/push-loop pattern:
+
+- *Your question is the boundary* — no fragile semantic-VAD cadence, no auto-pause/resume keystroke fights, no mic-bleed cancelling explanations.
+- *Pay only on recall* — zero transcription cost while idle; one `gpt-4o-transcribe` call per question.
+- *You stay in playback control* — Samuel does not press K on your behalf; you pause when *you* want to ask.
+- *Window picked from intent* — "what just happened" → 15s, "the last clip" → 30s, "the chorus" → 60s, "the meeting so far" → 180–300s. The model picks; you don't have to specify exact seconds.
+
+The recall result includes a structured `reason` (`ok` / `buffer_off` / `no_capture` / `no_speech` / `filtered_*` / `empty_transcript` / `transcribe_error`) so Samuel gives you actionable diagnostics instead of "I don't know."
+
+### Consent Popups — Real Allow/Deny for Privacy-Sensitive Tools
+
+Tools that flip on a continuous-perception surface — `listen_in_background(active=true)` and `set_screen_observation(mode='continuous')` — are marked `needsApproval: true`. When Samuel calls one for the first time (or after you revoked it), an in-app approval card appears in the transcript:
+
+```
+🎧 Listen to system audio (so I can answer questions about what you're playing)
+   listen_in_background
+   [Allow]   [Deny]
+```
+
+Two non-obvious details:
+
+- **No auto-approve countdown** for these two specific tools. Other tools auto-approve after 10s if you're away from the keyboard; privacy grants don't — you have to consciously click Allow.
+- **Persistence on Allow.** Approving flips the underlying preference (`privacy.audio_listen` or `privacy.screen_watch`) so future sessions just work. Revoke any time via the settings panel toggle or by saying "stop listening to my speakers."
 
 ### Smart Context — Decide Before Capturing
 
@@ -313,6 +352,8 @@ Toggle screen watching and audio listening directly from the settings button. Al
 | `plugin_manage` | Self-modification — propose, write, **repair**, remove, list plugins |
 | `skill_manage` | Save, search, and replay multi-step workflows |
 | `recording` | Start/stop system audio capture |
+| `listen_in_background` | Toggle the rolling system-audio buffer (consent popup the first time it flips on) |
+| `recall_audio` | Pull-model transcript-on-demand: "translate the last 30s", "what did they say?" |
 | `watch_for` | Register ambient triggers — keyword or classifier-based |
 | `set_control_mode` | Switch background / observe / ask / takeover |
 | `set_listening_mode` | Switch normal / passive listening |
