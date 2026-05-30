@@ -16,9 +16,17 @@
  *
  *   - "proactive" (screen_watch, audio_listen): default OFF. Controls the
  *     ambient watcher and learning loops. Does NOT block on-demand tools.
- *   - "tool" (screen_read, voice_input, computer_use): default ON. Controls
- *     the tools the model can call directly during a turn. These are
- *     master kill-switches for the corresponding capability.
+ *   - "tool" (screen_read, audio_record, computer_use): default ON.
+ *     Controls the tools the model can call directly during a turn.
+ *     These are master kill-switches for the corresponding capability.
+ *   - "ambient context" (local_time, location): default varies. Gates
+ *     ambient context that's injected at session boot or fetched on
+ *     demand by tools. The model receives a clear "gated" signal so it
+ *     can ask the user to flip the toggle instead of guessing.
+ *
+ * Voice input (privacy.voice_input) is a fourth axis enforced at the
+ * React layer — see App.tsx — because the realtime mic is renderer-side
+ * and there's no tool to gate. It doesn't have a helper here.
  */
 
 const PREFS_KEY = "samuel-ui-prefs";
@@ -46,13 +54,41 @@ export const privacy = {
   canReadScreen(): boolean {
     return readBool("privacy.screen_read", true);
   },
-  /** Realtime voice mic + wake word — Samuel hearing the user's voice. */
-  canHearVoice(): boolean {
-    return readBool("privacy.voice_input", true);
+  /**
+   * Explicit on-demand system-audio capture via the `recording` tool —
+   * "record this song", "capture what's playing". Distinct from
+   * canListenAmbient() (the passive audio buffer + learning loop), which
+   * is gated by privacy.audio_listen. Users who want zero audio capture
+   * under any circumstance need both off.
+   */
+  canRecordAudio(): boolean {
+    return readBool("privacy.audio_record", true);
   },
   /** Desktop automation: clicks, typing, key presses, computer_use loop. */
   canControlComputer(): boolean {
     return readBool("privacy.computer_use", true);
+  },
+  /**
+   * Knowledge of the user's local time + IANA timezone. Default OFF —
+   * opt-in. When off:
+   *   - Session-boot inject in useRealtime.ts sends UTC instead of local time.
+   *   - get_time() with no `tz` argument falls back to UTC.
+   *   - get_time(tz="...") still works because the user named the zone.
+   * Timezone leaks region (~country/state granularity) so this is treated
+   * as ambient context, not a tool guard — there's no "permission denied"
+   * surface; instead the model gets UTC and is told why.
+   */
+  canKnowTime(): boolean {
+    return readBool("privacy.local_time", false);
+  },
+  /**
+   * Approximate physical location via IP geolocation (city, region, country).
+   * Default OFF — opt-in. Calling get_location while disabled returns a
+   * permission error. Does NOT cover GPS-grade location; that would need a
+   * separate CoreLocation bridge.
+   */
+  canKnowLocation(): boolean {
+    return readBool("privacy.location", false);
   },
 };
 
@@ -63,7 +99,7 @@ export const privacy = {
  * the user instead of retrying.
  */
 export function privacyBlockError(
-  capability: "screen reading" | "voice input" | "computer use",
+  capability: "screen reading" | "audio recording" | "voice input" | "computer use" | "location",
 ): string {
   return JSON.stringify({
     ok: false,

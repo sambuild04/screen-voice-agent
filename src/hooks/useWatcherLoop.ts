@@ -23,6 +23,7 @@ export function useWatcherLoop(
   agentState?: "idle" | "listening" | "thinking" | "speaking",
   learningActive?: boolean,
   screenWatchEnabled = true,
+  audioListenEnabled = true,
 ) {
   const agentStateRef = useRef(agentState);
   agentStateRef.current = agentState;
@@ -30,6 +31,11 @@ export function useWatcherLoop(
   learningActiveRef.current = learningActive;
   const screenWatchRef = useRef(screenWatchEnabled);
   screenWatchRef.current = screenWatchEnabled;
+  // Mirrors privacy.audio_listen. When the user flips this off, any
+  // watcher-side audio capture must be released even if a watcher with
+  // source="audio"/"both" is still active — the toggle is the master gate.
+  const audioListenRef = useRef(audioListenEnabled);
+  audioListenRef.current = audioListenEnabled;
   const inFlightRef = useRef(false);
   // Tracks whether we currently hold the watcher-side slot of the shared
   // audio capture. Used to decide when to acquire/release per tick.
@@ -66,15 +72,20 @@ export function useWatcherLoop(
 
       const hasScreenTriggers = enabled.some((w) => w.source === "screen" || w.source === "both");
       const hasAudioTriggers = enabled.some((w) => w.source === "audio" || w.source === "both");
+      // Audio capture is gated by BOTH a watcher needing it and the user
+      // having privacy.audio_listen enabled. Without this AND, flipping
+      // audio_listen off in Settings wouldn't actually stop watcher-side
+      // capture if any audio/both trigger was active.
+      const wantAudio = hasAudioTriggers && audioListenRef.current;
 
       // Drive watcher audio capture lifecycle: acquire when needed, release
       // when not. The Electron side refcounts so this composes with learning
       // mode's audio capture without double-spawning the helper.
-      if (hasAudioTriggers && !audioHeldRef.current) {
+      if (wantAudio && !audioHeldRef.current) {
         await invoke("start_watcher_audio").catch(() => {});
         audioHeldRef.current = true;
         console.log("[watcher-standalone] acquired audio capture");
-      } else if (!hasAudioTriggers && audioHeldRef.current) {
+      } else if (!wantAudio && audioHeldRef.current) {
         await invoke("stop_watcher_audio").catch(() => {});
         audioHeldRef.current = false;
         console.log("[watcher-standalone] released audio capture");
@@ -95,9 +106,11 @@ export function useWatcherLoop(
           }
         }
 
-        // Audio content: language-agnostic chunk via the watcher-side check
+        // Audio content: language-agnostic chunk via the watcher-side check.
+        // Only transcribe when we actually hold the capture slot — which
+        // already implies privacy.audio_listen is on (see wantAudio above).
         let audioText = "";
-        if (hasAudioTriggers && audioHeldRef.current) {
+        if (hasAudioTriggers && audioHeldRef.current && audioListenRef.current) {
           try {
             const res = await invoke<{ transcript: string | null }>("check_watcher_audio");
             audioText = res?.transcript ?? "";

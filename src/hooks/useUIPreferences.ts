@@ -136,11 +136,11 @@ const SCHEMA: Record<string, PropSchema> = {
   //     `needsApproval: true`, so any time these flip OFF and need to come
   //     back on, the user sees an explicit allow/deny popup. Settings panel
   //     toggles remain the manual override path for revoking permanently.
-  //   • "tool" master switches (screen_read, voice_input, computer_use) —
-  //     default ON. Gate the tools the model can call during a turn.
-  //     Flipping one off is a master kill-switch for that capability;
-  //     enforced in src/lib/samuel-privacy.ts + tool execute() guards
-  //     in src/lib/samuel.ts.
+  //   • "tool" master switches (screen_read, audio_record, voice_input,
+  //     computer_use) — default ON. Gate the tools the model can call
+  //     during a turn. Flipping one off is a master kill-switch for that
+  //     capability; enforced in src/lib/samuel-privacy.ts + tool execute()
+  //     guards in src/lib/samuel.ts.
   "privacy.screen_watch": {
     type: "boolean", default: true,
     aliases: ["privacy.screen_watch_enabled", "privacy.screen"],
@@ -152,6 +152,16 @@ const SCHEMA: Record<string, PropSchema> = {
   "privacy.screen_read": {
     type: "boolean", default: true,
     aliases: ["privacy.screen_reading", "privacy.read_screen"],
+  },
+  "privacy.audio_record": {
+    // Master kill-switch for the model-driven `recording` tool — explicit
+    // on-demand system-audio capture (e.g. "record this song"). Distinct
+    // from privacy.audio_listen, which only governs passive ambient
+    // listening (the audio buffer + learning loop). Default ON to preserve
+    // existing behavior; users who want zero audio capture under any
+    // circumstance flip both this and audio_listen off.
+    type: "boolean", default: true,
+    aliases: ["privacy.recording", "privacy.audio_recording", "privacy.record_audio"],
   },
   "privacy.voice_input": {
     type: "boolean", default: true,

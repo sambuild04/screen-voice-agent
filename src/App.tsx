@@ -55,11 +55,14 @@ export default function App() {
 
   // Standalone watcher loop: evaluates triggers even when learning mode is off.
   // Defers to useLearningMode when it's active (avoids double-evaluation).
+  // Gated by both screen_watch (for screen triggers) and audio_listen
+  // (for audio/both triggers) so the Settings toggles fully control it.
   useWatcherLoop(
     status,
     agentState,
     learning.learningActive,
     ui.prefs["privacy.screen_watch"] as boolean,
+    ui.prefs["privacy.audio_listen"] as boolean,
   );
 
   // Sync Samuel's voice volume with the preference
@@ -75,6 +78,7 @@ export default function App() {
   const handlePrivacyToggle = useCallback((key:
     | "privacy.screen_watch"
     | "privacy.audio_listen"
+    | "privacy.audio_record"
     | "privacy.screen_read"
     | "privacy.voice_input"
     | "privacy.computer_use"

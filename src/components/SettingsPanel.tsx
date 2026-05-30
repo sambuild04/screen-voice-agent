@@ -7,6 +7,7 @@ import { MemoryBrowser } from "./MemoryBrowser";
 type ToggleKey =
   | "privacy.screen_watch"
   | "privacy.audio_listen"
+  | "privacy.audio_record"
   | "privacy.screen_read"
   | "privacy.voice_input"
   | "privacy.computer_use"
@@ -181,7 +182,7 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
             <div className="settings-toggle-info">
               <span className="settings-toggle-label">Proactive Screen Watch</span>
               <span className="settings-toggle-desc">
-                Let Samuel watch your screen between turns for language hints
+                Let Samuel watch your screen between turns — powers language hints, watch-list triggers, and other ambient screen alerts
               </span>
             </div>
             <div
@@ -209,6 +210,21 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
 
           <label className="settings-toggle-row">
             <div className="settings-toggle-info">
+              <span className="settings-toggle-label">On-Demand Audio Recording</span>
+              <span className="settings-toggle-desc">
+                Let Samuel capture system audio when you ask ("record this", "listen to this clip")
+              </span>
+            </div>
+            <div
+              className={`settings-switch ${prefs["privacy.audio_record"] ? "settings-switch-on" : ""}`}
+              onClick={() => onToggle("privacy.audio_record")}
+            >
+              <div className="settings-switch-thumb" />
+            </div>
+          </label>
+
+          <label className="settings-toggle-row">
+            <div className="settings-toggle-info">
               <span className="settings-toggle-label">Local Time</span>
               <span className="settings-toggle-desc">
                 Allow Samuel to know your local time and timezone
@@ -226,7 +242,7 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
             <div className="settings-toggle-info">
               <span className="settings-toggle-label">Location</span>
               <span className="settings-toggle-desc">
-                Allow Samuel to know your approximate location for contextual help
+                Allow Samuel to look up your approximate location (city-level, IP-based) for "where am I", weather, and locale-specific help
               </span>
             </div>
             <div

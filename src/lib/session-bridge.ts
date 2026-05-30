@@ -135,6 +135,7 @@ export function registerSetPassiveListening(fn: SetPassiveListeningFn | null) {
 export function setPassiveListening(passive: boolean): boolean {
   if (!setPassiveListeningFn) return false;
   setPassiveListeningFn(passive);
+  patchRuntimeState({ passive_listening: passive });
   return true;
 }
 
@@ -167,6 +168,10 @@ export function setScreenObservation(
 ): boolean {
   if (!setScreenObservationFn) return false;
   setScreenObservationFn(mode, opts);
+  patchRuntimeState({
+    screen_observation_mode: mode,
+    screen_observation_app: opts?.app ?? null,
+  });
   return true;
 }
 
@@ -227,6 +232,7 @@ export function registerLearningLanguage(fn: LearningLanguageFn | null) {
 /** Called by Samuel's set_learning_language tool to activate/deactivate learning mode. */
 export function notifyLearningLanguage(language: string | null) {
   learningLanguageFn?.(language);
+  patchRuntimeState({ learning_language: language });
 }
 
 export function registerSendSilentContext(fn: SendSilentContextFn | null) {
@@ -376,4 +382,65 @@ export function registerAudioBufferState(fn: AudioBufferStateFn | null) {
 /** Surface the audio buffer's running state to UI chrome. */
 export function notifyAudioBufferState(active: boolean) {
   audioBufferStateFn?.(active);
+  patchRuntimeState({ audio_buffer_active: active });
+}
+
+// ---------------------------------------------------------------------------
+// Agent runtime state snapshot (read by the get_system_status tool)
+// ---------------------------------------------------------------------------
+//
+// Pull-based introspection following the OpenAI cookbook pattern for
+// data-intensive Realtime apps: hooks that own a piece of runtime state
+// publish patches here as it changes; the get_system_status tool reads
+// the current snapshot synchronously when the model asks "do you have
+// access to X / are you doing Y / what's your current mode".
+//
+// Why a module-level snapshot instead of threading React state into the
+// tool: tools execute in plain async functions outside the React tree,
+// so they can't subscribe to hook state. localStorage covers the prefs
+// half (sync, stable, observable), and this container covers the live
+// session half (volatile, only meaningful while the app is running).
+//
+// Each field defaults to a "don't know yet" value so a brand-new session
+// reading the snapshot before any hook has registered won't fabricate
+// false certainty — the tool surfaces nulls/false honestly.
+
+export interface AgentRuntimeState {
+  /** Realtime WebRTC connection state — true once the SDK reports "connected". */
+  realtime_connected: boolean;
+  /** True when the realtime mic is muted (master Voice Input toggle OR user-muted). */
+  muted: boolean;
+  /** Current agent loop state from the SDK. */
+  agent_state: "idle" | "listening" | "thinking" | "speaking" | "unknown";
+  /** Passive vs normal listening — passive only responds when explicitly addressed. */
+  passive_listening: boolean;
+  /** Screen observation mode set by the model via set_screen_observation. */
+  screen_observation_mode: "on_demand" | "continuous";
+  /** App-scope filter for continuous screen observation (null = all visible apps). */
+  screen_observation_app: string | null;
+  /** Ambient audio buffer running flag — gated by privacy.audio_listen. */
+  audio_buffer_active: boolean;
+  /** Active learning language (BCP-47 tag), null when learning mode is off. */
+  learning_language: string | null;
+}
+
+let runtimeState: AgentRuntimeState = {
+  realtime_connected: false,
+  muted: false,
+  agent_state: "unknown",
+  passive_listening: false,
+  screen_observation_mode: "on_demand",
+  screen_observation_app: null,
+  audio_buffer_active: false,
+  learning_language: null,
+};
+
+/** Merge a partial update into the runtime snapshot. Hooks call this when they own a piece of state that changed. */
+export function patchRuntimeState(patch: Partial<AgentRuntimeState>): void {
+  runtimeState = { ...runtimeState, ...patch };
+}
+
+/** Read the current runtime snapshot. Used by the get_system_status tool. */
+export function getRuntimeState(): AgentRuntimeState {
+  return { ...runtimeState };
 }

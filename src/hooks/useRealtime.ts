@@ -3,8 +3,9 @@ import { invoke, debugLog } from "../lib/invoke-bridge";
 import { RealtimeAgent, RealtimeSession, OpenAIRealtimeWebRTC } from "@openai/agents/realtime";
 import type { FunctionTool, RealtimeOutputGuardrail, RealtimeItem } from "@openai/agents/realtime";
 import { samuelAgent } from "../lib/samuel";
+import { privacy } from "../lib/samuel-privacy";
 import type { ScreenObservationMode } from "../lib/session-bridge";
-import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerSetScreenObservation, registerDiscardLastTurn, registerInjectCorrection } from "../lib/session-bridge";
+import { registerSendImage, registerSendText, registerScreenTarget, registerSendSilentContext, registerSendTextAndRespond, registerReloadPlugins, notifyLearningLanguage, registerSetVolume, registerSetPassiveListening, registerSetScreenObservation, registerDiscardLastTurn, registerInjectCorrection, patchRuntimeState } from "../lib/session-bridge";
 import { loadAllPlugins } from "../lib/plugin-loader";
 
 // ---------------------------------------------------------------------------
@@ -515,6 +516,20 @@ export function useRealtime(): UseRealtimeReturn {
   const [isMuted, setIsMuted] = useState(false);
   const [screenTarget, setScreenTarget] = useState<string | null>(null);
   const screenTargetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Mirror live session state into the bridge runtime snapshot so the
+  // get_system_status tool can answer "are you connected / muted / what
+  // are you doing right now" without threading React state into tools.
+  // One effect per slice keeps the patch surface minimal.
+  useEffect(() => {
+    patchRuntimeState({ realtime_connected: status === "connected" });
+  }, [status]);
+  useEffect(() => {
+    patchRuntimeState({ agent_state: agentState });
+  }, [agentState]);
+  useEffect(() => {
+    patchRuntimeState({ muted: isMuted });
+  }, [isMuted]);
 
   const sessionRef = useRef<RealtimeSession | null>(null);
   const micStreamRef = useRef<Promise<MediaStream | undefined> | null>(null);
@@ -2309,10 +2324,24 @@ export function useRealtime(): UseRealtimeReturn {
       } else {
         setTranscript([makeEntry("status", "Connected")]);
 
-        // Inject local time so Samuel's greeting is time-appropriate.
-        // Uses sendMessage which creates the item and triggers a response.
+        // Inject local time so Samuel's greeting is time-appropriate. Gated
+        // by privacy.local_time: when off, send UTC instead — the model is
+        // told explicitly so it won't pretend to know the user's actual zone.
+        // The greeting prompt is identical in both branches; only the time
+        // payload differs. Uses sendMessage which creates the item and
+        // triggers a response.
         const now = new Date();
-        const timeCtx = `[System: Current local time is ${now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: true })} on ${now.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}. Greet the user in ENGLISH with one short sentence. You MUST speak English.]`;
+        const localTimeAllowed = privacy.canKnowTime();
+        const timeStr = now.toLocaleTimeString("en-US", {
+          hour: "2-digit", minute: "2-digit", hour12: true,
+          ...(localTimeAllowed ? {} : { timeZone: "UTC" }),
+        });
+        const dateStr = now.toLocaleDateString("en-US", {
+          weekday: "long", year: "numeric", month: "long", day: "numeric",
+          ...(localTimeAllowed ? {} : { timeZone: "UTC" }),
+        });
+        const timeLabel = localTimeAllowed ? "local time" : "UTC time (local time gated by Settings → Privacy → Local Time)";
+        const timeCtx = `[System: Current ${timeLabel} is ${timeStr} on ${dateStr}. Greet the user in ENGLISH with one short sentence. You MUST speak English.]`;
 
         // Load saved skills and inject summaries so Samuel knows what workflows are available.
         // Skill content is user-authored — sanitize before splicing into a system message

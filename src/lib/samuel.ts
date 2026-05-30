@@ -1,7 +1,7 @@
 import { RealtimeAgent, tool, backgroundResult } from "@openai/agents/realtime";
 import { z } from "zod";
 import { invoke } from "./invoke-bridge";
-import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection, setAudioBufferActive, applyUIUpdate } from "./session-bridge";
+import { sendImageToSession, notifyScreenTarget, notifyRecordingAction, notifyLearningLanguage, reloadPlugins, showPluginProposal, clearPluginProposal, notifyPluginBuildProgress, setVolume, setPassiveListening, setScreenObservation, discardLastTurn, injectCorrection, setAudioBufferActive, applyUIUpdate, getRuntimeState } from "./session-bridge";
 import { loadPlugin, triggerRepair, getLastExecution } from "./plugin-loader";
 import { privacy, privacyBlockError } from "./samuel-privacy";
 
@@ -294,9 +294,21 @@ const getTimeTool = tool({
       try {
         new Intl.DateTimeFormat("en-US", { ...opts, timeZone: zone });
       } catch {
-        note = ` (couldn't parse timezone "${zone}", using local)`;
+        // Bad IANA → fall through to no-tz path so the gate logic below
+        // gets to decide between local and UTC instead of leaking local
+        // unconditionally.
+        note = ` (couldn't parse timezone "${zone}")`;
         zone = undefined;
       }
+    }
+    // Privacy gate: when no `tz` is supplied AND privacy.local_time is OFF,
+    // we don't know the user's zone for free — fall back to UTC and tell
+    // the model so it can mention the gate instead of pretending to know.
+    // When `tz` IS supplied, the user / model named the zone explicitly so
+    // there's no leak even if the toggle is off.
+    if (!zone && !privacy.canKnowTime()) {
+      const utcStr = new Intl.DateTimeFormat("en-US", { ...opts, timeZone: "UTC" }).format(now);
+      return toolOk(`${utcStr} (UTC) — local time is gated by Settings → Privacy → Local Time. Pass an explicit \`tz\` (e.g. tz="America/Los_Angeles") if you know the user's zone, or ask them to enable Local Time.${note}`);
     }
     const timeStr = new Intl.DateTimeFormat("en-US", {
       ...opts,
@@ -304,6 +316,134 @@ const getTimeTool = tool({
     }).format(now);
     const localZone = zone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     return toolOk(`${timeStr} (${localZone})${note}`);
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Approximate physical location (IP-based)
+// ---------------------------------------------------------------------------
+//
+// IP geolocation is city-grade (~10–50 km) and reflects the public exit IP,
+// so it sees ISP / VPN egress instead of true position when one is in use.
+// That's intentionally less precise than CoreLocation; for "where am I"
+// questions it's still the right default — no permission prompt, no GPS
+// hardware spinup, and the privacy toggle is the user's single point of
+// control. If a future use case needs sub-100m precision we'd add a
+// separate CoreLocation Swift helper gated on the same toggle.
+//
+// Cached per-process for 10 minutes since IP geolocation rarely changes
+// within a single session and the free-tier providers throttle aggressively.
+
+let locationCache: { ts: number; payload: Record<string, unknown> } | null = null;
+const LOCATION_CACHE_TTL_MS = 10 * 60 * 1000;
+
+interface IpapiCoResponse {
+  error?: boolean;
+  reason?: string;
+  city?: string;
+  region?: string;
+  country_name?: string;
+  country_code?: string;
+  latitude?: number;
+  longitude?: number;
+  postal?: string;
+  timezone?: string;
+}
+
+interface IpwhoIsResponse {
+  success?: boolean;
+  message?: string;
+  city?: string;
+  region?: string;
+  country?: string;
+  country_code?: string;
+  latitude?: number;
+  longitude?: number;
+  postal?: string;
+  timezone?: { id?: string };
+}
+
+const getLocationTool = tool({
+  name: "get_location",
+  description:
+    "Return the user's approximate physical location (city, region, country, " +
+    "coarse coordinates, postal code, timezone) via IP-based geolocation. " +
+    "Resolution is city-level (~10–50 km), based on the public IP — not GPS. " +
+    "On a VPN or Tailscale exit node, the result reflects the exit location " +
+    "rather than true whereabouts; mention that caveat if it looks off.\n\n" +
+    "Use when:\n" +
+    "  - User asks 'where am I', 'what city am I in', 'what's my postal code', " +
+    "'what timezone am I really in'.\n" +
+    "  - You need a geographic anchor for weather, restaurants, traffic, or " +
+    "other locale-specific recommendations and the user hasn't already named " +
+    "the place.\n\n" +
+    "Privacy: requires Settings → Privacy → 'Location' (default OFF). When " +
+    "off this returns a permission error — pass it back to the user verbatim, " +
+    "tell them how to enable it, do NOT keep retrying. Result is cached " +
+    "in-process for 10 minutes.",
+  parameters: z.object({}),
+  async execute() {
+    if (!privacy.canKnowLocation()) return privacyBlockError("location");
+
+    const now = Date.now();
+    if (locationCache && now - locationCache.ts < LOCATION_CACHE_TTL_MS) {
+      return toolOk("Approximate location (cached):", locationCache.payload);
+    }
+
+    // Primary provider: ipapi.co. Free tier, HTTPS, no API key needed.
+    try {
+      const res = await fetch("https://ipapi.co/json/", {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as IpapiCoResponse;
+      if (data.error) throw new Error(data.reason ?? "ipapi error");
+
+      // Whitelist what we expose to the model — drop ip / org / asn so the
+      // user's network identity stays out of the conversation transcript.
+      const payload = {
+        city: data.city,
+        region: data.region,
+        country: data.country_name,
+        country_code: data.country_code,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        postal: data.postal,
+        timezone: data.timezone,
+        source: "ipapi.co",
+      };
+      locationCache = { ts: now, payload };
+      return toolOk("Approximate location:", payload);
+    } catch (primaryErr) {
+      // Fallback: ipwho.is. Different schema, same idea. Useful when the
+      // primary's free quota gets hit.
+      try {
+        const res = await fetch("https://ipwho.is/", {
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as IpwhoIsResponse;
+        if (data.success === false) throw new Error(data.message ?? "ipwho error");
+
+        const payload = {
+          city: data.city,
+          region: data.region,
+          country: data.country,
+          country_code: data.country_code,
+          latitude: data.latitude,
+          longitude: data.longitude,
+          postal: data.postal,
+          timezone: data.timezone?.id,
+          source: "ipwho.is",
+        };
+        locationCache = { ts: now, payload };
+        return toolOk("Approximate location:", payload);
+      } catch (fallbackErr) {
+        const primary = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+        const fallback = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+        return toolErr("network", `Location lookup failed: ${primary}; fallback also failed: ${fallback}`);
+      }
+    }
   },
 });
 
@@ -336,6 +476,136 @@ const volumeTool = tool({
     } catch (e) {
       return toolErr("system_error", `Failed to set system volume: ${e}`);
     }
+  },
+});
+
+// ---------------------------------------------------------------------------
+// System status — agent self-introspection
+// ---------------------------------------------------------------------------
+//
+// Pull-based state inspection following the OpenAI cookbook pattern for
+// data-intensive Realtime apps (see "Practical guide to data-intensive
+// apps with the Realtime API" §2: Optimize the context). The model
+// regularly fields meta-questions like "can you see my screen?", "are
+// you listening right now?", "do you have access to my location?". Out
+// of the box it has no way to answer these correctly because tool
+// definitions describe what's *possible*, not what's *currently
+// permitted/active*. Without a fact-source, the model either over-claims
+// (says yes because the tool exists) or hallucinates a denial.
+//
+// This tool exposes:
+//   - Live privacy toggle states (sync read from localStorage), plus
+//     a where_to_change hint per toggle so the model can advise the
+//     user how to flip a setting instead of vague hand-waving.
+//   - Active ambient-loop flags (audio buffer, learning mode, screen
+//     observation) read from the session-bridge runtime snapshot —
+//     hooks publish patches into that snapshot as state changes.
+//   - Static session info (voice, model, version) for capability
+//     identity questions.
+//
+// Cost: zero IPC, zero network. Pure synchronous read across two
+// in-process sources (localStorage + module state). Safe to call
+// liberally — no rate-limiting needed.
+
+// Versions bumped manually on release. The samuelAgent block below
+// hardcodes "ash" / "gpt-realtime-2"; if you change those, change here too.
+const SAMUEL_VOICE = "ash";
+const SAMUEL_MODEL = "gpt-realtime-2";
+const SAMUEL_VERSION = "0.1.0";
+
+interface PrivacyToggleStatus {
+  /** Reads localStorage; default supplied here mirrors useUIPreferences SCHEMA. */
+  key: string;
+  defaultValue: boolean;
+  label: string;
+}
+
+const PRIVACY_TOGGLES: PrivacyToggleStatus[] = [
+  { key: "privacy.screen_read", defaultValue: true, label: "Screen Reading" },
+  { key: "privacy.voice_input", defaultValue: true, label: "Voice Input" },
+  { key: "privacy.computer_use", defaultValue: true, label: "Computer Use" },
+  { key: "privacy.screen_watch", defaultValue: true, label: "Proactive Screen Watch" },
+  { key: "privacy.audio_listen", defaultValue: true, label: "Proactive Audio Listening" },
+  { key: "privacy.audio_record", defaultValue: true, label: "On-Demand Audio Recording" },
+  { key: "privacy.local_time", defaultValue: false, label: "Local Time" },
+  { key: "privacy.location", defaultValue: false, label: "Location" },
+];
+
+function readPrivacyToggle(t: PrivacyToggleStatus): boolean {
+  try {
+    const raw = localStorage.getItem("samuel-ui-prefs");
+    if (!raw) return t.defaultValue;
+    const prefs = JSON.parse(raw) as Record<string, unknown>;
+    const v = prefs[t.key];
+    return typeof v === "boolean" ? v : t.defaultValue;
+  } catch {
+    return t.defaultValue;
+  }
+}
+
+const getSystemStatusTool = tool({
+  name: "get_system_status",
+  description:
+    "Return Samuel's current runtime state — privacy toggles, active ambient " +
+    "loops, session connection, voice/model identity — as a structured snapshot. " +
+    "Each gated capability includes a where_to_change hint so you can tell the " +
+    "user exactly how to flip a setting instead of saying 'check settings'.\n\n" +
+    "Use when:\n" +
+    "  - User asks 'can you see my screen / hear me / access my location?' or " +
+    "any 'do you have / are you / what's your current ...' meta-question.\n" +
+    "  - User pushes back on a capability claim ('you said you can't see X — " +
+    "check again').\n" +
+    "  - You're about to refuse a request — call this first to confirm whether " +
+    "the capability is actually disabled or you're just guessing.\n" +
+    "  - User asks 'how do I turn X on/off' — read the where_to_change hint and " +
+    "tell them.\n\n" +
+    "Do NOT dump the entire JSON to the user — synthesize one or two natural " +
+    "sentences. Example: 'Yes, sir, I can see your screen on demand. Watching " +
+    "between turns is currently off — flip Settings → Privacy → Proactive Screen " +
+    "Watch if you want it.'",
+  parameters: z.object({}),
+  async execute() {
+    const privacyStatus: Record<string, { enabled: boolean; where_to_change: string }> = {};
+    for (const t of PRIVACY_TOGGLES) {
+      privacyStatus[t.key.replace("privacy.", "")] = {
+        enabled: readPrivacyToggle(t),
+        where_to_change: `Settings → Privacy → ${t.label}`,
+      };
+    }
+
+    const rt = getRuntimeState();
+
+    return toolOk("Current system status", {
+      privacy: privacyStatus,
+      active_loops: {
+        audio_buffer: {
+          active: rt.audio_buffer_active,
+          depends_on: "privacy.audio_listen",
+          model_can_toggle_via: "listen_in_background tool",
+        },
+        learning_mode: {
+          active: rt.learning_language !== null,
+          language: rt.learning_language,
+          model_can_toggle_via: "set_learning_language tool",
+        },
+        screen_observation: {
+          mode: rt.screen_observation_mode,
+          scoped_to_app: rt.screen_observation_app,
+          model_can_toggle_via: "set_screen_observation tool",
+        },
+      },
+      session: {
+        realtime_connected: rt.realtime_connected,
+        muted: rt.muted,
+        agent_state: rt.agent_state,
+        passive_listening: rt.passive_listening,
+        voice: SAMUEL_VOICE,
+        model: SAMUEL_MODEL,
+      },
+      app: {
+        version: SAMUEL_VERSION,
+      },
+    });
   },
 });
 
@@ -1655,6 +1925,13 @@ const recordingTool = tool({
     action: z.enum(["start", "stop"]).describe("'start' to begin, 'stop' to end and transcribe"),
   }),
   async execute({ action }) {
+    // Master kill-switch: Settings → Privacy → "On-Demand Audio Recording".
+    // Distinct from privacy.audio_listen (the passive buffer/learning gate).
+    // Stop is allowed even when disabled so the user can always end an
+    // already-running capture, but a fresh start is blocked.
+    if (action === "start" && !privacy.canRecordAudio()) {
+      return privacyBlockError("audio recording");
+    }
     if (action === "start") {
       notifyRecordingAction("start");
       try {
@@ -2603,7 +2880,9 @@ NO TOOL on these turns — just answer directly in 1-3 short sentences:
 - Stop / steering: "stop", "wait", "I know", "enough", "never mind", "shut up", "be quiet".
 - Meta about you: "what can you do", "what are you doing", "are you there", "are you working", "who made you", "tell me a joke / story / fact", "sing me a song".
 - Generic factual chitchat answerable from your training: "what's 12 times 7", "what's the capital of France", "why is the sky blue".
-- Time-only questions: "what time is it" — for the FIRST time question of the session, answer from the "[System: Current local time …]" message. For ANY follow-up time question, ANY pushback ("that's wrong" / "are you sure?"), or any "time in <city>" question, call get_time(tz?) and answer from its result. The session-start time goes stale fast — never insist on it after the user disagrees.
+- Time-only questions: "what time is it" — for the FIRST time question of the session, answer from the "[System: Current local time …]" message (or "[System: Current UTC time …]" if local-time access is gated). For ANY follow-up time question, ANY pushback ("that's wrong" / "are you sure?"), or any "time in <city>" question, call get_time(tz?) and answer from its result. The session-start time goes stale fast — never insist on it after the user disagrees. If the system message says local time is gated by Settings → Privacy → Local Time, tell the user once how to enable it; do NOT keep returning UTC and pretending it's their local time.
+- Location questions: "where am I", "what city am I in", "what's my postal code", "what country", or anywhere you need a geographic anchor for weather/restaurants/traffic — call get_location. It's IP-based, city-grade, gated on the Settings → Privacy → Location toggle (default OFF). If it returns a permission error, tell the user once how to enable it; do NOT claim "no tool exists" — the tool exists, it's just gated. On a VPN/Tailscale the answer reflects the exit node, so caveat that if the city seems wrong.
+- Self-introspection / meta questions: "can you see my screen?", "are you listening to me?", "do you have access to my location?", "what mode are you in?", "are you watching anything right now?", "how do I turn off X?", "what version are you?", "what voice / model is this?" — call get_system_status FIRST and answer from its result. Without it you'll guess (over-claim because the tool exists, or under-claim from training bias). The response includes a where_to_change field on every togglable capability — surface that path verbatim when telling the user how to flip a setting. Do NOT print the raw JSON; synthesize one or two natural sentences. If the user pushes back on a capability ("you said you can't but you can"), re-call get_system_status — the toggle may have changed.
 
 YES TOOL only when the request is screen-grounded or action-grounded:
 - Screen-grounded — user references current visual state: "what does this say", "translate this", "what's in that email", "read the page", "what's highlighted", "summarize the article", "what's on my other monitor", "who's in this Slack thread".
@@ -3068,6 +3347,10 @@ export const samuelAgent = new RealtimeAgent({
     recordCorrectionTool,
     // Time (instant, no IPC)
     getTimeTool,
+    // Approximate physical location (IP-based, gated on privacy.location)
+    getLocationTool,
+    // Self-introspection — answers "can you / do you have access to / are you"
+    getSystemStatusTool,
     // Volume control
     volumeTool,
     // Open native apps
