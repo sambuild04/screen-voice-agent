@@ -1,8 +1,20 @@
 # Samuel — the AI that works with you, not for you
 
-An always-on voice AI desktop assistant for macOS that can use your screen and audio (when you allow it), browse the web in the background, write its own tools, and fix them when they break — built to avoid stealing focus unnecessarily. Built with Electron, React, TypeScript, and Playwright. MIT licensed.
+A **voice-first AI companion for macOS**. Wake-word activated, speaks back in under 500 ms, sees your screen and hears your system audio (when you allow it), drives any app, browses the web like a human, and writes its own tools — and repairs them when they break. Open source, MIT licensed.
 
-**Use cases:** ambient language learning, voice-controlled web browsing, self-building AI tools, hands-free desktop automation, live meeting interpretation, real-time video translation, AI tutoring, email/calendar access via browser automation, ambient monitoring ("tell me when you see/hear X").
+Think "ChatGPT Voice Mode that can actually see what you're doing" — or JARVIS for your Mac. Tools like Rewind/Limitless and Screenpipe record everything so you can search it *afterwards*; Cluely and Granola pin a text overlay on top of your meetings. Samuel is the only one you can **just talk to, in real time, about whatever just happened on your screen or in your audio**.
+
+**Use cases:**
+- *"What did they just say?"* mid-meeting, mid-podcast, mid-lecture
+- Live in-call assist for sales, support, interviews — voice answer instead of a text overlay
+- Hands-free Mac control for RSI, motor disabilities, and VoiceOver users
+- Ambient language learning while watching anime, K-drama, news, or YouTube
+- Real-time translation of anything playing through your speakers
+- ADHD body-doubling and voice capture without breaking flow
+- Meeting summarization without a bot joining the call
+- Voice-controlled web browsing ("show me my Gmail")
+- Self-building AI tools by voice ("build me a weather widget")
+- Ambient monitoring ("tell me when you hear / see X")
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS](https://img.shields.io/badge/platform-macOS-black.svg)
@@ -39,6 +51,47 @@ Ambient teaching while watching anime — voice explanations and trigger alerts:
 https://github.com/user-attachments/assets/65314d07-694d-47c5-8209-24e5bdbdf55c
 
 https://github.com/user-attachments/assets/338f8194-49e6-496d-b218-715af4afa1ee
+
+---
+
+## What Only Samuel Does
+
+The AI desktop landscape in 2026 is crowded. Most products pick one corner. Samuel is the only one combining all four of these in a single Mac-native app:
+
+1. **Wake-word voice in / voice out, sub-500 ms.** Not push-to-talk. Not type-and-read. You talk, Samuel talks back, fast enough to feel like a person in the room. Built on the OpenAI Realtime API.
+2. **Ambient screen + audio context.** Samuel watches what you watch and hears what you hear — when you allow it. So you can ask *"what did they just say?"* / *"translate the last 30 seconds"* / *"what's that error mean?"* and he already has the context to answer.
+3. **Real computer use.** Clicks, types, drives apps via the macOS Accessibility tree with a GPT-5.5 visual fallback. He doesn't just *see* — he can *do*.
+4. **Self-modifying tools.** Writes new plugins on demand with GPT-5.5 reasoning, reviews them with GPT-4o-mini, and auto-repairs them when they break. The toolset grows with you.
+
+### How Samuel compares to other live-context AI on Mac
+
+| | **Samuel** | Screenpipe | Cluely | Granola | Otter / Fathom | ChatGPT Voice | Limitless / Rewind |
+|---|---|---|---|---|---|---|---|
+| Voice in (wake word) | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Voice out (real-time speech) | ✅ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Sub-500 ms voice loop | ✅ | — | — | — | — | ✅ | — |
+| Sees your screen | ✅ | ✅ | ✅ | ❌ | ❌ | Limited | ✅ |
+| Hears system audio | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ (was) |
+| Live "what just happened?" answers | ✅ | ❌ (search after) | Text overlay | ❌ (after meeting) | ❌ (after meeting) | ❌ | ❌ (search after) |
+| Proactive speech ("I just heard…") | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Companion modes (passive listen, language tutor) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Drives apps (clicks, types, native input) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Self-writes / auto-repairs tools | ✅ | Pipes (manual) | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Open source | ✅ MIT | ✅ MIT | ❌ | ❌ | ❌ | ❌ | Was closed |
+| Status (May 2026) | Active | Active | Active | Active | Active | Active | **Shut down Dec 2025** |
+
+The key reading of this table: **Screenpipe owns the always-on memory + automation lane** (search-after-the-fact, pipes to Slack/Notion/Linear, on-device PII scrubbing). They've done that well. **Samuel owns the voice-first conversational lane** — you can actually *talk* to your Mac about what's happening, in real time, by voice. Different DNA, different shape.
+
+### Who Samuel is for, today
+
+- **Knowledge workers in back-to-back meetings** who keep missing details and want a voice they can ask, not a transcript they have to scroll
+- **Sales reps, customer success, recruiters, interviewers** who want a live voice-coach, not a stealth text overlay
+- **Hard-of-hearing professionals** who already use macOS Live Captions but can't *ask* the captions a question
+- **Online students and lifelong learners** binge-ing courses, lectures, conference talks, and YouTube tutorials
+- **Language immersion learners** watching anime, K-drama, telenovelas, news, podcasts in their target language
+- **RSI / hands-free / VoiceOver users** for whom keyboard-and-mouse is painful or impossible
+- **ADHD body-doublers and voice-first thinkers** who'd rather speak than type
+- **Tinkerers and indie hackers** who want a JARVIS they can extend by writing plugins out loud
 
 ---
 
@@ -480,32 +533,22 @@ The vision: an AI that can work alongside you where you do: optional screen and 
 
 ---
 
-## How It Compares
-
-| Capability | **Samuel** | ChatGPT Voice | Granola | Cluely | Otter.ai |
-|---|---|---|---|---|---|
-| Voice conversation | Yes | Yes | No | No | No |
-| Screen vision | Yes | Partial | No | Yes | No |
-| Audio listening | Yes | No | Yes | Yes | Yes |
-| Proactive alerts ("tell me when X") | Yes | No | No | No | No |
-| Web browsing (real browser) | Yes | No | No | No | No |
-| Self-modifying (writes tools) | Yes | No | No | No | No |
-| Auto-repairs its own tools | Yes | No | No | No | No |
-| Persistent memory | Yes | Limited | No | No | No |
-| Open source | Yes (MIT) | No | No | No | No |
-
----
-
 ## FAQ
 
 **What is Samuel?**
 An open-source voice AI desktop agent that can use your screen and system audio when enabled, obeys privacy toggles, lets you control it by voice, browses the web like a human, and writes and repairs its own tools at runtime using GPT-5.5 with reasoning.
 
 **What can I use it for?**
-Language learning while watching content, hands-free web browsing ("show me my emails"), building custom AI tools by voice, live meeting interpretation, searching and summarizing anything on the web, ambient monitoring ("tell me when you hear X"), and general desktop automation.
+The "what did they just say?" moment in any meeting, podcast, lecture, or video. Live in-call voice coaching for sales/support/interviews. Hands-free Mac use for RSI and VoiceOver users. Ambient language learning while watching content. Real-time translation. Building custom AI tools by voice. Searching and summarizing anything on the web. Ambient monitoring ("tell me when you hear X"). Meeting summaries without a bot. General desktop automation.
 
 **How is this different from ChatGPT Voice?**
-ChatGPT does not run as a see-your-desktop assistant with your tool and plugin surface. Samuel integrates screen/audio (when allowed), real browser automation, persistent local skills, and an auto-repair loop for plugins. The assistant runs locally on your Mac; model calls still go to OpenAI when you use those features.
+ChatGPT Voice talks fast but is mostly blind to your desktop — it can't see what's on your screen, can't hear what's playing through your speakers, can't drive your apps, and can't remember anything across sessions. Samuel adds all four: ambient screen + audio context (when you allow it), native macOS computer use (Accessibility + visual fallback), real browser automation via Playwright, and persistent local skills/preferences/memory. Same low-latency voice feel, but with eyes, ears, hands, and memory.
+
+**How is this different from Screenpipe / Rewind / Limitless?**
+Those are memory + search products: they record everything, then you *type a query later* to find it. Screenpipe in particular is excellent at that — pipes to 48+ apps, on-device PII scrubbing, MIT-licensed. Samuel is a different shape: a real-time voice presence you talk to *while things are happening*. You can ask him out loud what was just said, get an answer in under a second, and keep watching. Where Screenpipe hands you a search box, Samuel hands you a colleague.
+
+**How is this different from Cluely / Granola / Otter / Fathom?**
+Cluely puts a stealth text overlay on your meetings. Granola/Otter/Fathom give you transcripts and summaries after the meeting. None of them speak. Samuel does — out loud, mid-meeting, by voice — so you don't have to look away from the speaker or break eye contact to read an overlay or open a transcript later.
 
 **What models does it use?**
 OpenAI Realtime API for voice, GPT-5.5 with reasoning for code generation and failure diagnosis, GPT-4o Vision for screen capture, GPT-4o-mini for code review, Whisper for transcription.
