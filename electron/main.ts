@@ -1,11 +1,27 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, shell } from "electron";
 import path from "node:path";
+import fs from "node:fs";
 import { execFile } from "node:child_process";
 
 import { handleInvoke } from "./handlers/index.js";
 import { setWindowRef } from "./window-ref.js";
 
 let mainWindow: BrowserWindow | null = null;
+
+// Resolve Samuel's app icon for both packaged (resources/icon.png) and
+// dev (../build/icon.png relative to compiled dist-electron/main.js) layouts.
+// Prefers the higher-resolution PNG so the dock can pick the best size.
+function resolveAppIconPath(): string | null {
+  const candidates = [
+    path.join(process.resourcesPath ?? "", "icon.png"),
+    path.join(__dirname, "..", "build", "icon.png"),
+    path.join(__dirname, "..", "..", "build", "icon.png"),
+  ];
+  for (const p of candidates) {
+    if (p && fs.existsSync(p)) return p;
+  }
+  return null;
+}
 
 function requestAccessibilityPermission() {
   execFile(
@@ -30,6 +46,9 @@ function requestAccessibilityPermission() {
 }
 
 function createWindow() {
+  const iconPath = resolveAppIconPath();
+  const iconImage = iconPath ? nativeImage.createFromPath(iconPath) : null;
+
   mainWindow = new BrowserWindow({
     width: 520,
     height: 740,
@@ -40,12 +59,19 @@ function createWindow() {
     skipTaskbar: true,
     resizable: true,
     backgroundColor: "#00000000",
+    icon: iconImage ?? undefined,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
+
+  // Dock icon comes from the .app bundle in production, but in dev we still see
+  // the default Electron icon unless we explicitly set it on app.dock.
+  if (process.platform === "darwin" && iconImage && app.dock) {
+    app.dock.setIcon(iconImage);
+  }
 
   if (process.env.NODE_ENV === "development") {
     mainWindow.loadURL("http://localhost:5173");

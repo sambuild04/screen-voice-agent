@@ -2,9 +2,13 @@ node_modules/
 dist/
 dist-ui/
 dist-electron/
+dist-app/
 *.log
 .env
 .DS_Store
+
+# avatar backups created when swapping the .riv asset
+public/character.riv.old.*
 
 # Tauri
 src-tauri/target/

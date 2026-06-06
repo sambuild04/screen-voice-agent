@@ -14,6 +14,7 @@
     "electron:compile": "tsc -p electron/tsconfig.json && cp electron/package.json dist-electron/package.json",
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"unset ELECTRON_RUN_AS_NODE && NODE_ENV=development electron dist-electron/main.js\"",
     "electron:build": "npm run ui:build && npm run electron:compile && electron-builder",
+    "release": "scripts/release.sh",
     "cli:build": "tsc -p tsconfig.cli.json",
     "cli:start": "node dist/index.js",
     "cli:dev": "tsx src-cli/index.ts",
@@ -58,19 +59,42 @@
     "files": [
       "dist-electron/**/*",
       "dist-ui/**/*",
-      "helpers/**/*"
+      "helpers/**/*",
+      "build/icon.png"
     ],
     "extraResources": [
       {
         "from": "helpers",
         "to": "helpers",
         "filter": ["**/*"]
+      },
+      {
+        "from": "build/icon.png",
+        "to": "icon.png"
       }
     ],
     "mac": {
       "target": "dmg",
       "category": "public.app-category.productivity",
-      "darkModeSupport": true
+      "darkModeSupport": true,
+      "icon": "build/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Samuel listens for the wake word and your voice — only when you turn on Voice Input or Audio Listening in Settings.",
+        "NSScreenCaptureUsageDescription": "Samuel reads your screen to help with what you're working on — only when you turn on Screen Watch or Screen Read in Settings.",
+        "NSAppleEventsUsageDescription": "Samuel controls other apps on your Mac on your behalf — only when you turn on Computer Use in Settings.",
+        "NSSpeechRecognitionUsageDescription": "Samuel converts your speech to text — only when you turn on Voice Input in Settings.",
+        "NSLocationUsageDescription": "Samuel uses your location to answer location-aware questions — only when you turn on Location in Settings.",
+        "NSLocationWhenInUseUsageDescription": "Samuel uses your location to answer location-aware questions — only when you turn on Location in Settings.",
+        "NSDesktopFolderUsageDescription": "Samuel can read files you ask it to look at, on your Desktop.",
+        "NSDocumentsFolderUsageDescription": "Samuel can read files you ask it to look at, in your Documents.",
+        "NSDownloadsFolderUsageDescription": "Samuel can read files you ask it to look at, in your Downloads.",
+        "LSApplicationCategoryType": "public.app-category.productivity",
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSHumanReadableCopyright": "© 2026 Samuel. All rights reserved."
+      }
+    },
+    "dmg": {
+      "icon": "build/icon.icns"
     }
   },
   "engines": {
