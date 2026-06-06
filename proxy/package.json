@@ -1,0 +1,17 @@
+{
+  "name": "samuel-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that relays a small set of OpenAI endpoints behind per-installation rate limits for Samuel trial users.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250801.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^3.78.0"
+  }
+}

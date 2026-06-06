@@ -1,15 +1,11 @@
 import { writeFileSync, unlinkSync, copyFileSync } from "node:fs";
-import { readConfigInternal } from "./config.js";
+import { openaiFetch } from "./openai-client.js";
 
 export async function transcribe_audio(args: {
 	audio_base64: string;
 	extension: string;
 }): Promise<string> {
 	if (!args.audio_base64) return "";
-
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key in ~/.books-reader.json");
 
 	const audioBytes = Buffer.from(args.audio_base64, "base64");
 
@@ -41,9 +37,8 @@ export async function transcribe_audio(args: {
 		"Transcribe any English speech. If the audio is silence, noise, music, or non-English speech, return an empty string.",
 	);
 
-	const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+	const resp = await openaiFetch("/v1/audio/transcriptions", {
 		method: "POST",
-		headers: { Authorization: `Bearer ${apiKey}` },
 		body: form,
 		signal: AbortSignal.timeout(10_000),
 	});

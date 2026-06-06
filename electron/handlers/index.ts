@@ -13,6 +13,9 @@ import * as wakeWord from "./wake-word.js";
 import * as appPerms from "./app-permissions.js";
 import * as axObserver from "./ax-observer.js";
 import * as dataExport from "./data-export.js";
+import * as consent from "./consent.js";
+import * as installationId from "./installation-id.js";
+import * as openaiClient from "./openai-client.js";
 
 // All IPC args arrive as plain objects from the renderer process.
 // We cast loosely since the Rust→TS port preserves the same arg shapes.
@@ -34,6 +37,9 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 
 	get_config: () => config.get_config(),
 	create_ephemeral_key: () => config.create_ephemeral_key(),
+	set_user_api_key: (a) => config.set_user_api_key(a as never),
+	get_installation_id: () => installationId.get_installation_id(),
+	fetch_trial_status: () => openaiClient.fetch_trial_status(),
 
 	capture_active_window: (a) => capture.capture_active_window(a as never),
 	get_frontmost_app: () => capture.get_frontmost_app(),
@@ -148,6 +154,8 @@ const handlers: Record<string, (args: A) => Promise<unknown>> = {
 	set_app_permission: (a) => appPerms.set_app_permission(a as never),
 	list_app_permissions: () => appPerms.list_app_permissions(),
 	clear_app_permissions: () => appPerms.clear_app_permissions(),
+
+	request_privacy_consent: (a) => consent.request_privacy_consent(a as never),
 
 	start_ax_observer: () => axObserver.start_ax_observer(),
 	stop_ax_observer: () => axObserver.stop_ax_observer(),

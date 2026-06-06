@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { readConfigInternal } from "./config.js";
 import { browser_command } from "./browser.js";
 import { getWindowRef } from "../window-ref.js";
+import { openaiFetch } from "./openai-client.js";
 
 const MAX_TURNS = 30;
 const VIEWPORT_W = 1280;
@@ -32,10 +32,6 @@ interface DisplayDimensions {
 // ── Browser-mode CUA ────────────────────────────────────────────────────
 
 export async function cua_run(task: string, url?: string): Promise<CuaResult> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	if (url) {
 		await browser_command("open", { url });
 	}
@@ -69,7 +65,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 		max_output_tokens: 2048,
 	};
 
-	let resp = await callResponsesApi(apiKey, firstBody);
+	let resp = await callResponsesApi(firstBody);
 	let prevRespId = resp.id ?? "";
 	let turns = 0;
 	let lastScreenshotB64: string | null = initSs;
@@ -130,7 +126,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 			max_output_tokens: 2048,
 		};
 
-		resp = await callResponsesApi(apiKey, followBody);
+		resp = await callResponsesApi(followBody);
 		prevRespId = resp.id ?? "";
 	}
 }
@@ -138,10 +134,6 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 // ── Native-mode CUA ────────────────────────────────────────────────────
 
 export async function cua_run_native(task: string, app?: string): Promise<CuaResult> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	const { width: screenW, height: screenH } = getDisplayPointDimensions();
 	const screenshotH = Math.round((NATIVE_W * screenH) / screenW);
 	const scaleX = screenW / NATIVE_W;
@@ -196,7 +188,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 			max_output_tokens: 2048,
 		};
 
-		let resp = await callResponsesApi(apiKey, firstBody);
+		let resp = await callResponsesApi(firstBody);
 		let prevRespId = resp.id ?? "";
 		let turns = 0;
 		let lastScreenshotB64: string | null = initSs;
@@ -259,7 +251,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 				max_output_tokens: 2048,
 			};
 
-			resp = await callResponsesApi(apiKey, followBody);
+			resp = await callResponsesApi(followBody);
 			prevRespId = resp.id ?? "";
 		}
 	} finally {
@@ -434,15 +426,10 @@ return (w as text) & "x" & (h as text)`;
 }
 
 async function callResponsesApi(
-	apiKey: string,
 	body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-	const resp = await fetch("https://api.openai.com/v1/responses", {
+	const resp = await openaiFetch("/v1/responses", {
 		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify(body),
 	});
 

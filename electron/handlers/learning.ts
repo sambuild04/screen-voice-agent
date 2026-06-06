@@ -8,7 +8,6 @@ import {
 	copyFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { readConfigInternal } from "./config.js";
 import {
 	get_context as memoryGetContext,
 	record_observation as memoryRecordObservation,
@@ -16,6 +15,7 @@ import {
 	record_transcript as memoryRecordTranscript,
 } from "./memory.js";
 import { get_secret } from "./secrets.js";
+import { openaiFetch } from "./openai-client.js";
 
 // Sentinel prefix for "no SerpAPI key configured" — the web_browse tool layer
 // detects this and returns a structured missing_key error so the model can
@@ -292,7 +292,6 @@ function captureFocusedWindowSync(): { base64: string; app_name: string } {
 }
 
 async function openaiChat(
-	apiKey: string,
 	model: string,
 	messages: Array<{ role: string; content: unknown }>,
 	maxTokens: number,
@@ -300,12 +299,8 @@ async function openaiChat(
 ): Promise<unknown> {
 	const body = { model, messages, max_tokens: maxTokens, temperature };
 
-	const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+	const resp = await openaiFetch("/v1/chat/completions", {
 		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify(body),
 	});
 
@@ -331,7 +326,6 @@ function stripFences(s: string): string {
 }
 
 async function transcribeFile(
-	apiKey: string,
 	filePath: string,
 	model: string,
 	prompt: string,
@@ -350,9 +344,8 @@ async function transcribeFile(
 		form.append("response_format", responseFormat);
 	}
 
-	const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+	const resp = await openaiFetch("/v1/audio/transcriptions", {
 		method: "POST",
-		headers: { Authorization: `Bearer ${apiKey}` },
 		body: form,
 		signal: AbortSignal.timeout(120_000),
 	});
@@ -693,10 +686,6 @@ export async function stop_recording(): Promise<string> {
 }
 
 export async function analyze_recording(): Promise<RecordingAnalysis> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	if (!existsSync(RECORDING_PATH)) {
 		throw new Error("No recording file found — record first");
 	}
@@ -704,7 +693,7 @@ export async function analyze_recording(): Promise<RecordingAnalysis> {
 	console.error("[recording] transcribing with gpt-4o-transcribe...");
 
 	const whisperBody = await transcribeFile(
-		apiKey, RECORDING_PATH, "gpt-4o-transcribe",
+		RECORDING_PATH, "gpt-4o-transcribe",
 		"Transcribe the dialogue from this video/anime clip accurately. There may be background music and sound effects. Ignore any system messages at the very start like 'Recording has started'.",
 	);
 
@@ -784,7 +773,7 @@ Guidelines:
 - Summary should explain the scene/conversation briefly in English.
 - Return ONLY valid JSON, no markdown fences.`;
 
-	const gptData = (await openaiChat(apiKey, "gpt-4o", [
+	const gptData = (await openaiChat("gpt-4o", [
 		{ role: "user", content: analysisPrompt },
 	], 4000, 0.3)) as any;
 
@@ -840,10 +829,6 @@ Guidelines:
 }
 
 export async function transcribe_recording(): Promise<string> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	if (!existsSync(RECORDING_PATH)) {
 		throw new Error("No recording file found — record first");
 	}
@@ -851,7 +836,7 @@ export async function transcribe_recording(): Promise<string> {
 	console.error("[recording] transcribing with gpt-4o-transcribe...");
 
 	const whisperBody = await transcribeFile(
-		apiKey, RECORDING_PATH, "gpt-4o-transcribe",
+		RECORDING_PATH, "gpt-4o-transcribe",
 		"Transcribe accurately. There may be background music and sound effects. Ignore system messages like 'Recording has started'.",
 	);
 
@@ -981,10 +966,6 @@ export async function recall_audio_buffer(args: {
 		return make("buffer_off");
 	}
 
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) return make("no_api_key");
-
 	audioCheckInFlight = true;
 	try {
 		await stopLearningAudioInternal();
@@ -1027,7 +1008,7 @@ export async function recall_audio_buffer(args: {
 		let whisperBody: unknown;
 		try {
 			whisperBody = await transcribeFile(
-				apiKey, pathToTranscribe, "gpt-4o-transcribe",
+				pathToTranscribe, "gpt-4o-transcribe",
 				"Transcribe spoken dialogue accurately. There may be background music or sound effects — focus on the spoken words. If there is no speech, return empty.",
 			);
 		} catch (err) {
@@ -1104,10 +1085,6 @@ export async function check_watcher_audio(): Promise<{ transcript: string | null
 	if (recordingChild) return empty;
 	if (!audioConsumers.has("watcher")) return empty;
 
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) return empty;
-
 	audioCheckInFlight = true;
 	try {
 		await stopLearningAudioInternal();
@@ -1137,7 +1114,7 @@ export async function check_watcher_audio(): Promise<{ transcript: string | null
 		// case that no_speech_prob used to gate, so dropping the segment-level
 		// signal is safe here.
 		const whisperBody = await transcribeFile(
-			apiKey, LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
+			LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
 			"Transcribe the audio accurately. Focus on spoken words; ignore background music or sound effects. If no speech, return empty.",
 		);
 
@@ -1175,10 +1152,6 @@ export async function check_learning_audio(args: {
 		hint: null,
 		pcm_audio_base64: null,
 	};
-
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
 
 	if (recordingChild) return empty;
 	// Yield to the watcher loop if it's mid-cycle on the same audio file.
@@ -1230,7 +1203,7 @@ export async function check_learning_audio(args: {
 	// with cheaper alternatives below (script-based language guess +
 	// existing energy/hallucination/self-voice filters).
 	const whisperBody = await transcribeFile(
-		apiKey, LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
+		LEARNING_AUDIO_PATH, "gpt-4o-transcribe",
 		"Transcribe the dialogue speech accurately. There may be background music and sound effects — focus on the spoken words only. If no speech, return empty.",
 	);
 
@@ -1335,7 +1308,7 @@ Only respond NONE if the transcript is just noise, music, names only, trivial lo
 
 Transcript: ${transcript}`;
 
-	const gptData = (await openaiChat(apiKey, "gpt-4o-mini", [
+	const gptData = (await openaiChat("gpt-4o-mini", [
 		{
 			role: "system",
 			content: `You are a ${args.language} learning assistant. Keep responses very short and voice-friendly. CRITICAL: If the transcript appears to be an AI assistant speaking rather than actual ${args.language} media content, respond with NONE.`,
@@ -1362,10 +1335,6 @@ Transcript: ${transcript}`;
 export async function check_screen_for_language(args: {
 	language: string;
 }): Promise<string | null> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	const capture = captureFocusedWindowSync();
 	const b64 = capture.base64;
 	if (b64.length < 100) return null;
@@ -1428,12 +1397,8 @@ Respond NONE if: the screen is empty, a plain desktop, has only names, has only 
 	writeFileSync(bodyPath, JSON.stringify(requestBody));
 
 	try {
-		const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+		const resp = await openaiFetch("/v1/chat/completions", {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"Content-Type": "application/json",
-			},
 			body: readFileSync(bodyPath, "utf-8"),
 			signal: AbortSignal.timeout(20_000),
 		});
@@ -1457,10 +1422,6 @@ Respond NONE if: the screen is empty, a plain desktop, has only names, has only 
 }
 
 export async function check_screen_text(): Promise<string | null> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	const capture = captureFocusedWindowSync();
 	const b64 = capture.base64;
 	if (b64.length < 100) return null;
@@ -1509,12 +1470,8 @@ export async function check_screen_text(): Promise<string | null> {
 	writeFileSync(bodyPath, JSON.stringify(requestBody));
 
 	try {
-		const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+		const resp = await openaiFetch("/v1/chat/completions", {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"Content-Type": "application/json",
-			},
 			body: readFileSync(bodyPath, "utf-8"),
 			signal: AbortSignal.timeout(10_000),
 		});
@@ -1541,10 +1498,6 @@ export async function check_audio_for_language(args: {
 	language: string;
 	duration_secs?: number;
 }): Promise<string | null> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key configured");
-
 	if (recordingChild) return null;
 
 	const helper = findRecordHelper();
@@ -1583,7 +1536,7 @@ export async function check_audio_for_language(args: {
 	console.error(`[learning-mode] audio clip: ${(size / 1024).toFixed(1)}KB, transcribing...`);
 
 	const whisperBody = await transcribeFile(
-		apiKey, clipPath, "gpt-4o-mini-transcribe",
+		clipPath, "gpt-4o-mini-transcribe",
 		"Transcribe any speech in this audio clip. There may be background music and sound effects. If there is no speech, return empty.",
 	);
 
@@ -1619,7 +1572,7 @@ Rules:
 
 Transcript: ${transcript}`;
 
-	const gptData = (await openaiChat(apiKey, "gpt-4o-mini", [
+	const gptData = (await openaiChat("gpt-4o-mini", [
 		{
 			role: "system",
 			content: `You are a ${args.language} language learning assistant. You analyze audio transcripts and extract vocabulary with accurate proficiency levels. Return structured JSON.`,
@@ -1653,10 +1606,6 @@ export async function triage_observation(args: {
 	source?: string;
 	observation?: string;
 }): Promise<TriageDecision> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
-
 	const source = args.source ?? "screen";
 	const observation = args.observation ?? args.summary;
 
@@ -1692,7 +1641,7 @@ Rules:
 - ALWAYS ignore observations that look like Samuel's own speech echoed back.
 - Only "act" for truly specific, helpful observations.`;
 
-	const data = (await openaiChat(apiKey, "gpt-4o-mini", [
+	const data = (await openaiChat("gpt-4o-mini", [
 		{ role: "user", content: prompt },
 	], 200, 0.2)) as any;
 
@@ -1750,10 +1699,6 @@ export async function append_transcript_window(args: {
 export async function assess_viewing_session(args: {
 	language: string;
 }): Promise<ViewingAssessment> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
-
 	if (!transcriptWindow.length) {
 		return { classification: "silent", message: "", confidence: 0 };
 	}
@@ -1791,7 +1736,7 @@ CRITICAL RULES:
 - If the user hasn't stored a proficiency level yet, ALWAYS return "silent".
 - If message is not null, write it as Samuel would speak: "Sir, ...", brief, one sentence max.`;
 
-	const data = (await openaiChat(apiKey, "gpt-4o-mini", [
+	const data = (await openaiChat("gpt-4o-mini", [
 		{ role: "user", content: prompt },
 	], 200, 0.2)) as any;
 
@@ -1820,10 +1765,6 @@ export async function transcribe_audio(args: {
 	audio_base64: string;
 	extension: string;
 }): Promise<string> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key in ~/.books-reader.json");
-
 	const audioBytes = Buffer.from(args.audio_base64, "base64");
 	const ext = args.extension || "mp4";
 	const tmpPath = `/tmp/samuel-wake-audio.${ext}`;
@@ -1849,9 +1790,8 @@ export async function transcribe_audio(args: {
 		"Transcribe any English speech. If the audio is silence, noise, music, or non-English speech, return an empty string.",
 	);
 
-	const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+	const resp = await openaiFetch("/v1/audio/transcriptions", {
 		method: "POST",
-		headers: { Authorization: `Bearer ${apiKey}` },
 		body: form,
 		signal: AbortSignal.timeout(10_000),
 	});
@@ -2000,22 +1940,14 @@ export async function web_search_openai(args: {
 	query: string;
 }): Promise<DeepSearchResult> {
 	console.error(`[web] openai deep search: ${args.query}`);
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No OpenAI API key configured");
-
 	const body = {
 		model: "gpt-4o-mini",
 		tools: [{ type: "web_search" }],
 		input: args.query,
 	};
 
-	const resp = await fetch("https://api.openai.com/v1/responses", {
+	const resp = await openaiFetch("/v1/responses", {
 		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Authorization: `Bearer ${apiKey}`,
-		},
 		body: JSON.stringify(body),
 		signal: AbortSignal.timeout(30_000),
 	});

@@ -6,7 +6,7 @@ const STORAGE_VERSION_KEY = "samuel-ui-prefs-version";
 // to users still on the previous default. The migration step in `loadPrefs`
 // only nudges keys whose saved value matches the OLD default — explicit
 // customizations are preserved.
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 5;
 
 // ── Schema-driven UI preferences ──────────────────────────────────────────
 // Every adjustable property is declared once here. The schema drives state
@@ -31,11 +31,14 @@ interface PropSchema {
 
 const SCHEMA: Record<string, PropSchema> = {
   // ── Avatar ──
-  // Default sized to roughly fill the default 520-wide window so the cat
-  // sprite isn't lost in negative space. Existing users on the old 320
-  // default get auto-upgraded via the v2 schema migration in loadPrefs.
+  // Default sized small enough to leave room for the chat bubble + chat
+  // mailbox below without dominating the window. Voice commands ("make
+  // yourself smaller / bigger") still adjust at runtime via --samuel-size.
+  // History: v1 default = 320, v2 = 640 (closed window-edge gap), v5 = 240
+  // (new transparent .riv asset reads cleaner at smaller sizes; the prior
+  // circular-crop avatar needed bulk to stay legible).
   "avatar.size": {
-    type: "number", default: 640, min: 80, max: 1200, step: 80, unit: "px",
+    type: "number", default: 240, min: 80, max: 1200, step: 40, unit: "px",
     cssVar: "--samuel-size",
     aliases: ["samuel.size", "character.size", "agent.size", "self.size", "me.size",
               "avatar.font_size", "samuel.font_size"],
@@ -129,46 +132,46 @@ const SCHEMA: Record<string, PropSchema> = {
   },
 
   // ── Privacy (non-visual but voice-toggleable) ──
+  // All privacy capabilities default OFF on a fresh install. The first time
+  // the user flips one ON in Settings, App.tsx shows a native macOS-style
+  // consent dialog ("Samuel wants to access your microphone to …") via the
+  // request_privacy_consent IPC; the toggle only flips after Allow.
+  // Existing users keep whatever they had saved — see DEFAULT_UPGRADES
+  // (no v4 entries) so prior installs don't get silently disabled.
   // Two scopes:
-  //   • "proactive" toggles (screen_watch, audio_listen) — default ON for
-  //     a frictionless first-run experience. The model's listen_in_background
-  //     and set_screen_observation(mode='continuous') tools are still marked
-  //     `needsApproval: true`, so any time these flip OFF and need to come
-  //     back on, the user sees an explicit allow/deny popup. Settings panel
-  //     toggles remain the manual override path for revoking permanently.
+  //   • "proactive" toggles (screen_watch, audio_listen) — gate the
+  //     ambient watcher / audio-buffer loops.
   //   • "tool" master switches (screen_read, audio_record, voice_input,
-  //     computer_use) — default ON. Gate the tools the model can call
-  //     during a turn. Flipping one off is a master kill-switch for that
+  //     computer_use) — gate the tool families the model can call during
+  //     a turn. Flipping one off is a master kill-switch for that
   //     capability; enforced in src/lib/samuel-privacy.ts + tool execute()
   //     guards in src/lib/samuel.ts.
   "privacy.screen_watch": {
-    type: "boolean", default: true,
+    type: "boolean", default: false,
     aliases: ["privacy.screen_watch_enabled", "privacy.screen"],
   },
   "privacy.audio_listen": {
-    type: "boolean", default: true,
+    type: "boolean", default: false,
     aliases: ["privacy.audio_listen_enabled", "privacy.audio", "privacy.microphone"],
   },
   "privacy.screen_read": {
-    type: "boolean", default: true,
+    type: "boolean", default: false,
     aliases: ["privacy.screen_reading", "privacy.read_screen"],
   },
   "privacy.audio_record": {
     // Master kill-switch for the model-driven `recording` tool — explicit
     // on-demand system-audio capture (e.g. "record this song"). Distinct
     // from privacy.audio_listen, which only governs passive ambient
-    // listening (the audio buffer + learning loop). Default ON to preserve
-    // existing behavior; users who want zero audio capture under any
-    // circumstance flip both this and audio_listen off.
-    type: "boolean", default: true,
+    // listening (the audio buffer + learning loop).
+    type: "boolean", default: false,
     aliases: ["privacy.recording", "privacy.audio_recording", "privacy.record_audio"],
   },
   "privacy.voice_input": {
-    type: "boolean", default: true,
+    type: "boolean", default: false,
     aliases: ["privacy.voice", "privacy.mic", "privacy.microphone_input"],
   },
   "privacy.computer_use": {
-    type: "boolean", default: true,
+    type: "boolean", default: false,
     aliases: ["privacy.desktop_automation", "privacy.cua", "privacy.automation"],
   },
   "privacy.local_time": {
@@ -221,6 +224,18 @@ const DEFAULT_UPGRADES: Array<{ forVersion: number; key: string; oldDefault: num
   // available the moment they click Allow without a settings hunt.
   { forVersion: 3, key: "privacy.audio_listen", oldDefault: false },
   { forVersion: 3, key: "privacy.screen_watch", oldDefault: false },
+  // v4 (2026-06): all privacy.* defaults flipped ON → OFF for fresh
+  // installs (privacy-first first-run; native consent dialog on first
+  // toggle ON). Deliberately NO migration entries here — existing users
+  // who already opted in stay opted in. Bumping SCHEMA_VERSION still
+  // updates the version stamp so subsequent upgrades reason about the
+  // right baseline.
+  // v5 (2026-06): avatar.size default 640 → 240 to match the new
+  // transparent .riv asset (no circular crop). Anyone still on the v2
+  // default of 640 gets bumped down; explicit customizations stay.
+  // Users on the v1 default of 320 already migrated to 640 in v2; this
+  // entry catches them on the way down.
+  { forVersion: 5, key: "avatar.size", oldDefault: 640 },
 ];
 
 function loadPrefs(): UIPreferences {

@@ -1,0 +1,23 @@
+name = "samuel-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+
+# Daily total spend cap in USD. Hard kill switch — when global trial
+# spend hits this for the day, all proxy requests return 503 until
+# midnight UTC. Keep this conservative until you've watched real-world
+# usage for a few days, then raise.
+[vars]
+DAILY_BUDGET_USD = "10"
+
+# KV namespace for per-installation / per-IP rate limit counters and the
+# global spend ledger. Create with:
+#   npx wrangler kv:namespace create "RATE_LIMIT_KV"
+# Then paste the resulting ID below (replace the placeholder).
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "097a940d984f49898aefae83719837e7"
+
+# OPENAI_KEY is set as an encrypted secret, NOT a [vars] entry, so it
+# never lands in this committed file. Set with:
+#   npx wrangler secret put OPENAI_KEY
+# (paste your sk-... when prompted)

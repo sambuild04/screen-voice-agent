@@ -75,7 +75,13 @@ export default function App() {
   const [envelopeOpen, setEnvelopeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const handlePrivacyToggle = useCallback((key:
+  // OFF → ON requires explicit consent: we surface a native macOS-style
+  // dialog ("Samuel would like to access …") and only persist the new
+  // value if the user clicks Allow. ON → OFF is unconditional — turning
+  // privacy off should always be one click. Toggle handler is async
+  // because the consent IPC roundtrips to the main process; the calling
+  // <div onClick> can fire-and-forget it.
+  const handlePrivacyToggle = useCallback(async (key:
     | "privacy.screen_watch"
     | "privacy.audio_listen"
     | "privacy.audio_record"
@@ -87,6 +93,13 @@ export default function App() {
   ) => {
     const current = ui.prefs[key];
     const prop = key.split(".")[1];
+    if (!current) {
+      const { allowed } = await invoke<{ allowed: boolean }>(
+        "request_privacy_consent",
+        { key },
+      );
+      if (!allowed) return;
+    }
     ui.applyUpdate({ component: "privacy", property: prop, value: current ? "false" : "true" });
   }, [ui.prefs, ui.applyUpdate]);
 

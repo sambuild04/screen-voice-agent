@@ -1,7 +1,12 @@
-import { readConfigInternal } from "./config.js";
+import { openaiFetch } from "./openai-client.js";
+
+// Thin wrappers around the OpenAI Chat Completions and Responses APIs
+// used by plugins.ts, learning.ts, and other handlers. The underlying
+// openaiFetch() routes through the trial proxy when no user key is set,
+// or directly to OpenAI when the user has provided their own key — so
+// callers never need to thread an `apiKey` parameter through.
 
 export async function callOpenai(
-	apiKey: string,
 	model: string,
 	system: string,
 	user: string,
@@ -18,11 +23,10 @@ export async function callOpenai(
 		max_tokens: maxTokens,
 	};
 
-	return callOpenaiRaw(apiKey, body);
+	return callOpenaiRaw(body);
 }
 
 export async function callOpenaiReasoning(
-	apiKey: string,
 	model: string,
 	system: string,
 	user: string,
@@ -40,19 +44,15 @@ export async function callOpenaiReasoning(
 	};
 
 	try {
-		const resp = await fetch("https://api.openai.com/v1/responses", {
+		const resp = await openaiFetch("/v1/responses", {
 			method: "POST",
-			headers: {
-				Authorization: `Bearer ${apiKey}`,
-				"Content-Type": "application/json",
-			},
 			body: JSON.stringify(body),
 		});
 
 		if (!resp.ok) {
 			const errText = await resp.text();
 			console.error(`[plugins] reasoning API error: ${errText}`);
-			return callOpenai(apiKey, model, system, user, 0.2, maxOutputTokens);
+			return callOpenai(model, system, user, 0.2, maxOutputTokens);
 		}
 
 		const data = await resp.json();
@@ -82,17 +82,13 @@ export async function callOpenaiReasoning(
 			throw err;
 		}
 		// Network or parse error — fall back to chat completions
-		return callOpenai(apiKey, model, system, user, 0.2, maxOutputTokens);
+		return callOpenai(model, system, user, 0.2, maxOutputTokens);
 	}
 }
 
-export async function callOpenaiRaw(apiKey: string, body: Record<string, unknown>): Promise<string> {
-	const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+export async function callOpenaiRaw(body: Record<string, unknown>): Promise<string> {
+	const resp = await openaiFetch("/v1/chat/completions", {
 		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify(body),
 	});
 
@@ -121,12 +117,4 @@ export function stripFences(code: string): string {
 		s = s.slice(0, -3);
 	}
 	return s.trim();
-}
-
-export async function getApiKey(): Promise<string> {
-	const config = readConfigInternal();
-	if (!config.apiKey) {
-		throw new Error("No API key configured");
-	}
-	return config.apiKey;
 }

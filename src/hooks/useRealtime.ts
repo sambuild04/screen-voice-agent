@@ -672,12 +672,28 @@ export function useRealtime(): UseRealtimeReturn {
   const MEDIA_NOISE_PASSIVE_THRESHOLD = 4;
   const MEDIA_NOISE_DECAY_MS = 30_000;
 
-  // Follow-up grace: after a manually-fired wake-word response completes
-  // in passive mode, give the user a short window to ask a follow-up
-  // without re-saying "Samuel". 15s is the OpenAI agents-py default for
-  // similar barge-in/follow-up patterns and matches Siri/Alexa UX.
-  const lastPassiveResponseAtRef = useRef(0);
-  const PASSIVE_FOLLOWUP_GRACE_MS = 15_000;
+  // Continuation window: in MANUAL passive mode, once a wake-word/command
+  // turn fires we keep the mic open for back-to-back follow-ups WITHOUT
+  // a fixed timer — same UX as ChatGPT Voice / Siri continuous / Alexa
+  // Follow-Up. The window stays open as long as the user is engaged and
+  // closes on disengagement signals:
+  //   * PASSIVE_INACTIVITY_TIMEOUT_MS of complete silence (no speech_started)
+  //   * a dismissal phrase ("thanks", "stop", "okay bye", "go to sleep", …)
+  //   * the media-noise streak detector firing (the show is back in control)
+  //   * leaving passive mode entirely
+  // A pure timer (the previous 15s grace) was anchored to response.done,
+  // which fires when token generation ends — but Samuel's audio playback
+  // for a long answer can take 30–60s, so the window expired before the
+  // user had even heard the reply. Engagement-based gating fixes that.
+  const passiveContinuationOpenRef = useRef(false);
+  const passiveContinuationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const PASSIVE_INACTIVITY_TIMEOUT_MS = 90_000;
+  // Dismissal phrases mirror Alexa's Follow-Up Mode exit set, plus
+  // Samuel-specific "ignore me again" and "back to watching" so the user
+  // can re-arm passive verbally. Matched as a complete utterance so
+  // "thanks for the explanation" doesn't accidentally close the window.
+  const PASSIVE_DISMISS_PATTERN =
+    /^(?:okay,?\s+|alright,?\s+|cool,?\s+)?(?:thanks(?:\s+samuel)?|thank\s+you(?:\s+samuel)?|bye(?:\s+samuel)?|goodbye|stop|that.?s\s+all|that.?s\s+it|never\s*mind|go\s+to\s+sleep|ignore\s+me\s+again|back\s+to\s+(?:passive|watching|the\s+video))\.?$/i;
 
   // Stash the server-VAD-flipping helper so armAutoPassive (defined
   // before the SDK session is constructed) can call it. Wired up inside
@@ -703,6 +719,41 @@ export function useRealtime(): UseRealtimeReturn {
     }
   };
 
+  // Open / extend the passive continuation window. Called every time a
+  // passive turn fires (wake word, command intent, or continuation hit)
+  // so back-to-back follow-ups don't need another wake word. The
+  // inactivity timer is reset on each call — the window only closes when
+  // the user actually stops talking for PASSIVE_INACTIVITY_TIMEOUT_MS.
+  const openPassiveContinuation = () => {
+    const wasOpen = passiveContinuationOpenRef.current;
+    passiveContinuationOpenRef.current = true;
+    if (passiveContinuationTimerRef.current) {
+      clearTimeout(passiveContinuationTimerRef.current);
+    }
+    passiveContinuationTimerRef.current = setTimeout(() => {
+      passiveContinuationTimerRef.current = null;
+      closePassiveContinuation(`${PASSIVE_INACTIVITY_TIMEOUT_MS / 1000}s silence`);
+    }, PASSIVE_INACTIVITY_TIMEOUT_MS);
+    if (!wasOpen) {
+      debugLog(
+        "listening-mode",
+        `continuation window OPEN — follow-ups don't need wake word (closes after ${PASSIVE_INACTIVITY_TIMEOUT_MS / 1000}s silence or dismissal)`,
+      );
+    }
+  };
+
+  // Close the continuation window. Idempotent. Reasons are logged so the
+  // user can see why a wake word is suddenly required again.
+  const closePassiveContinuation = (reason: string) => {
+    if (passiveContinuationTimerRef.current) {
+      clearTimeout(passiveContinuationTimerRef.current);
+      passiveContinuationTimerRef.current = null;
+    }
+    if (!passiveContinuationOpenRef.current) return;
+    passiveContinuationOpenRef.current = false;
+    debugLog("listening-mode", `continuation window CLOSED — ${reason}`);
+  };
+
   // After AUTO_PASSIVE_TIMEOUT_MS of post-response idle, auto-arm the
   // wake-word gate so ambient speech (the user talking to someone else, a
   // video playing, room noise that survived VAD) doesn't get treated as a
@@ -723,6 +774,10 @@ export function useRealtime(): UseRealtimeReturn {
     if (passiveListeningRef.current) return false;
     passiveListeningRef.current = true;
     autoPassiveRef.current = true;
+    // Auto-arming means the user has effectively stopped engaging
+    // (idle timer or media-noise streak). Any prior continuation is
+    // stale — re-require a wake word.
+    closePassiveContinuation(`auto-passive armed (${reason})`);
     // Server VAD: stop auto-creating responses until a wake-word turn
     // manually fires response.create. Same gate as manual passive.
     autoPassiveSyncRef.current?.(true);
@@ -1018,9 +1073,8 @@ export function useRealtime(): UseRealtimeReturn {
       // user choice.
       autoPassiveRef.current = false;
       clearInactivityTimer();
-      // Reset the follow-up grace window — entering or leaving passive is
-      // a hard mode boundary, not a continuation.
-      lastPassiveResponseAtRef.current = 0;
+      // Mode boundary — any prior continuation no longer applies.
+      closePassiveContinuation(passive ? "entering passive" : "leaving passive");
       // Flip server-side auto-response. In passive mode, only manual
       // response.create (on wake-word match) produces a model reply.
       setServerCreateResponse(!passive);
@@ -1031,7 +1085,9 @@ export function useRealtime(): UseRealtimeReturn {
     // as manual passive: flip server-side auto-response off so background
     // audio doesn't keep producing filler.
     autoPassiveSyncRef.current = (engaged: boolean) => {
-      lastPassiveResponseAtRef.current = 0;
+      // Continuation belongs to the previous engagement; close on either
+      // direction so it can't cross an auto-passive transition.
+      closePassiveContinuation(engaged ? "auto-passive engaging" : "auto-passive disengaging");
       setServerCreateResponse(!engaged);
     };
 
@@ -1535,11 +1591,16 @@ export function useRealtime(): UseRealtimeReturn {
     // (see setServerCreateResponse), so the server does NOT auto-create a
     // response on speech_stopped. The client decides per-transcript:
     //
-    //   - Wake word ("Samuel", "Sam", etc.) → fire response.create.
-    //   - Auto-passive + command-verb / service mention → fire (the user
-    //     said something that's clearly an instruction, e.g. "open spotify").
-    //   - Within follow-up grace window after a recent wake-word reply →
-    //     fire (so "and tomorrow?" works after "hey Samuel, weather?").
+    //   - Wake word ("Samuel", "Sam", etc.) → fire (and open continuation).
+    //   - Auto-passive + command-verb / service mention → fire (clear
+    //     instruction like "open spotify" exits auto-passive).
+    //   - Continuation window open (manual passive only) → fire without
+    //     a wake word, so back-to-back follow-ups feel like a real
+    //     conversation. Window opens on the first wake-word turn and
+    //     stays open as long as the user keeps engaging; it closes on
+    //     90s silence, dismissal phrases, or media-noise streaks.
+    //   - Dismissal phrase while continuation is open → close window,
+    //     don't fire. Next turn requires a wake word again.
     //   - Otherwise → silently drop the turn. Audio stays in conversation
     //     history (so a later "what did they just say?" still works).
     //
@@ -1555,9 +1616,20 @@ export function useRealtime(): UseRealtimeReturn {
       const wakeMatched = addressesSamuel(trimmed);
       const commandIntent = autoPassiveRef.current
         && (COMMAND_VERB_PATTERN.test(trimmed) || SERVICE_PATTERN.test(trimmed));
-      const followUpOpen = lastPassiveResponseAtRef.current > 0
-        && Date.now() - lastPassiveResponseAtRef.current < PASSIVE_FOLLOWUP_GRACE_MS;
-      if (!wakeMatched && !commandIntent && !followUpOpen) {
+      const continuationOpen = passiveContinuationOpenRef.current && !autoPassiveRef.current;
+      const isDismissal = continuationOpen && PASSIVE_DISMISS_PATTERN.test(trimmed);
+
+      // Dismissal closes the window without producing a reply. Re-arms
+      // the wake-word gate for the next turn.
+      if (isDismissal) {
+        closePassiveContinuation(`dismissal "${trimmed}"`);
+        return {
+          fire: false,
+          reason: `dismissal "${trimmed}" — wake word required again`,
+        };
+      }
+
+      if (!wakeMatched && !commandIntent && !continuationOpen) {
         return {
           fire: false,
           reason: `${autoPassiveRef.current ? "auto-passive" : "passive"}: no wake/command in "${trimmed}"`,
@@ -1583,7 +1655,7 @@ export function useRealtime(): UseRealtimeReturn {
           ? `wake word in "${trimmed}"`
           : commandIntent
             ? `command intent in "${trimmed}"`
-            : `follow-up grace (${Math.round((Date.now() - lastPassiveResponseAtRef.current) / 1000)}s)`,
+            : `continuation window — "${trimmed}"`,
       };
     };
 
@@ -1785,6 +1857,14 @@ export function useRealtime(): UseRealtimeReturn {
               mediaNoiseStreakRef.current += 1;
               lastMediaNoiseAtRef.current = now;
               if (mediaNoiseStreakRef.current >= MEDIA_NOISE_PASSIVE_THRESHOLD) {
+                // Already in manual passive with continuation open?
+                // armAutoPassive() bails out, so close the continuation
+                // here — the show is clearly back in control.
+                if (passiveListeningRef.current && passiveContinuationOpenRef.current) {
+                  closePassiveContinuation(
+                    `${mediaNoiseStreakRef.current} media-noise drops`,
+                  );
+                }
                 armAutoPassive(
                   `${mediaNoiseStreakRef.current} media-noise drops`,
                   "Background media detected \u2014 say \u201cSamuel\u201d or use a clear command (\u201copen\u2026\u201d, \u201cexplain\u2026\u201d) to address me.",
@@ -1842,6 +1922,13 @@ export function useRealtime(): UseRealtimeReturn {
             const decision = decidePassiveResponse(text);
             if (decision.fire) {
               debugLog("listening-mode", `firing response — ${decision.reason}`);
+              // Manual passive only: keep the mic open for back-to-back
+              // follow-ups. Auto-passive exits to NORMAL mode in the
+              // decision function (decidePassiveResponse), so it doesn't
+              // need a continuation window.
+              if (passiveListeningRef.current && !autoPassiveRef.current) {
+                openPassiveContinuation();
+              }
               try {
                 sessionRef.current?.transport.sendEvent({ type: "response.create" });
               } catch (e) {
@@ -1959,12 +2046,12 @@ export function useRealtime(): UseRealtimeReturn {
           assistantAudioStartedRef.current = false;
           agentResponseCountRef.current += 1;
           responseInProgressRef.current = false;
-          // Open the passive-mode follow-up grace window. After a
-          // wake-word reply, the next ~15s of user speech can fire a
-          // response without re-saying "Samuel" (Siri/Alexa-style UX).
-          if (passiveListeningRef.current) {
-            lastPassiveResponseAtRef.current = Date.now();
-          }
+          // Note: the passive continuation window is opened at the moment
+          // we *fire* the response (in the speech_stopped handler), not
+          // here at response.done. Anchoring to response.done was the old
+          // bug — for a long answer, token generation finishes 30–60s
+          // before audio playback does, so a fixed grace window expired
+          // before the user even heard the reply. See openPassiveContinuation.
           setAgentState("listening");
 
           // SAY-DO BACKSTOP: prompt rules are fragile because the model
@@ -2213,6 +2300,7 @@ export function useRealtime(): UseRealtimeReturn {
       registerInjectCorrection(null);
       registerSetScreenObservation(null);
       stopContinuousObservation();
+      closePassiveContinuation("session teardown");
       // Reset to on_demand for the next session — Option A: continuous
       // mode never persists across sessions.
       screenObservationModeRef.current = "on_demand";

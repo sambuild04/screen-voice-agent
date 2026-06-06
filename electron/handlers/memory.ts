@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { readConfigInternal } from "./config.js";
+import { openaiFetch } from "./openai-client.js";
 
 const MEMORY_DIR = ".samuel";
 const MEMORY_FILE = "memory.json";
@@ -654,10 +654,6 @@ export async function memory_add_correction(args: { what: string; source: string
 }
 
 export async function extract_session_feedback(args: { transcript: string }): Promise<string[]> {
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
-
 	const prompt = `Analyze this conversation between a user and their AI assistant "Samuel".
 Extract any feedback, corrections, or behavioral preferences the user expressed.
 
@@ -679,12 +675,8 @@ ${args.transcript}`;
 		max_tokens: 1000,
 	};
 
-	const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+	const resp = await openaiFetch("/v1/chat/completions", {
 		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
 		body: JSON.stringify(body),
 	});
 
@@ -895,10 +887,6 @@ export async function watch_evaluate_classifier(args: {
 	const watches = getClassifierWatchesInternal(args.source);
 	if (watches.length === 0) return [];
 
-	const config = readConfigInternal();
-	const apiKey = config.apiKey;
-	if (!apiKey) throw new Error("No API key");
-
 	const watchSpecs = watches
 		.map((w, i) => `  ${i + 1}. [id=${w.id}] ${w.description}`)
 		.join("\n");
@@ -942,12 +930,8 @@ export async function watch_evaluate_classifier(args: {
 		],
 	};
 
-	const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+	const resp = await openaiFetch("/v1/chat/completions", {
 		method: "POST",
-		headers: {
-			Authorization: `Bearer ${apiKey}`,
-			"Content-Type": "application/json",
-		},
 		signal: AbortSignal.timeout(8000),
 		body: JSON.stringify(body),
 	});

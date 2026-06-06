@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, copyFileSync } from "node:fs";
 import { join, parse as parsePath } from "node:path";
 import { homedir } from "node:os";
-import { callOpenai, callOpenaiReasoning, stripFences, getApiKey } from "./llm.js";
+import { callOpenai, callOpenaiReasoning, stripFences } from "./llm.js";
 
 const SAMUEL_DIR = ".samuel";
 const PLUGINS_DIR = "plugins";
@@ -169,10 +169,7 @@ Rules:
 - Handle errors gracefully — catch and return descriptive messages, don't let errors crash silently`;
 
 export async function generate_plugin_code(args: { description: string }): Promise<string> {
-	const apiKey = await getApiKey();
-
 	const raw = await callOpenaiReasoning(
-		apiKey,
 		"gpt-5.5",
 		PLUGIN_SYSTEM_PROMPT,
 		args.description,
@@ -185,8 +182,6 @@ export async function generate_plugin_code(args: { description: string }): Promi
 }
 
 export async function judge_plugin_code(args: { description: string; code: string }): Promise<string> {
-	const apiKey = await getApiKey();
-
 	const systemPrompt = `You are a code reviewer for an AI assistant's plugin system.
 Given a user's request and the generated JavaScript plugin code, determine if the code
 correctly implements what was requested.
@@ -205,7 +200,7 @@ Reply ONLY with valid JSON, no other text:
 
 	const userMsg = `REQUEST: ${args.description}\n\nCODE:\n\`\`\`\n${args.code}\n\`\`\``;
 
-	const raw = await callOpenai(apiKey, "gpt-4o-mini", systemPrompt, userMsg, 0.1, 500);
+	const raw = await callOpenai("gpt-4o-mini", systemPrompt, userMsg, 0.1, 500);
 	const clean = stripFences(raw);
 
 	try {
@@ -231,8 +226,6 @@ export async function diagnose_plugin_failure(args: {
 	actual_output: string;
 	signal: string;
 }): Promise<string> {
-	const apiKey = await getApiKey();
-
 	const systemPrompt = `You are diagnosing an AI-generated plugin failure. Output ONLY valid JSON.
 
 Categorize the failure as ONE of:
@@ -265,7 +258,7 @@ Output this exact JSON shape:
 		`INPUT: ${args.input_args}\n\n` +
 		`SOURCE:\n\`\`\`\n${args.plugin_source}\n\`\`\``;
 
-	const raw = await callOpenaiReasoning(apiKey, "gpt-5.5", systemPrompt, userMsg, "high", 1000);
+	const raw = await callOpenaiReasoning("gpt-5.5", systemPrompt, userMsg, "high", 1000);
 	const clean = stripFences(raw);
 
 	const fallback = (reason: string) =>
