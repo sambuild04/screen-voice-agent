@@ -56,14 +56,6 @@ Think "ChatGPT Voice Mode that can actually see what you're doing" — or JARVIS
 
 ---
 
-## Meet Samuel
-
-<p align="center">
-  <img src="docs/images/avatar.png" alt="Samuel — the avatar that lives on your Mac desktop" width="220" />
-</p>
-
-That's Samuel. He lives in a small floating window on your Mac, animates while you're talking, and stays out of the way the rest of the time. The avatar is rendered with [Rive](https://rive.app), so it's a few hundred kilobytes and runs at native frame rates.
-
 ## See It In Action
 
 Samuel interprets Japanese news in realtime — watching the screen and listening to audio simultaneously:
