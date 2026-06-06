@@ -446,16 +446,28 @@ Toggle screen watching and audio listening directly from the settings button. Al
 
 ## Quick Start
 
-> **Heads up:** A one-click installer is on the way. For now, install requires building from source. Star this repo or [open an issue](https://github.com/sambuild04/screen-voice-agent/issues/new?title=Notify+me+when+installer+is+ready) to be notified when the packaged release ships.
+### Option A — Download the DMG (recommended)
 
-### Prerequisites
+1. **[Download Samuel for Apple Silicon Mac](https://github.com/sambuild04/screen-voice-agent/releases/latest/download/Samuel-0.1.0-arm64.dmg)** (M1 / M2 / M3 / M4). Other versions: see the [latest release page](https://github.com/sambuild04/screen-voice-agent/releases/latest). _Intel Mac build is not yet shipped — build from source via Option B if you're on Intel._
+2. Open the DMG and drag **Samuel** to **Applications**.
+3. **First launch:** because Samuel is not yet notarized by Apple, double-clicking shows
+   *"Apple cannot verify that this app is free from malware."*
+   To get past it once: right-click `Samuel.app` in Applications → **Open** → **Open** in the dialog. Subsequent launches don't ask again. (Notarization is on the roadmap; it removes this step.)
+4. Grant the macOS permission prompts that appear the first time you turn on a privacy capability in **Settings → Privacy Controls** (microphone, screen recording, accessibility). Each toggle is OFF by default; nothing reaches OpenAI until you turn it on.
+5. **No OpenAI key required to start** — Samuel's free trial proxy lets you try it immediately. For unlimited use, paste your own key in **Settings → API Key**; the app then talks to OpenAI directly and never contacts the proxy. See [PRIVACY.md](./PRIVACY.md) for the full data-flow breakdown.
+
+Say **"Hey Samuel"** and start talking.
+
+### Option B — Build from source
+
+#### Prerequisites
 
 - macOS 14+ (Sonoma or later)
 - Node.js 20+
-- OpenAI API key with Realtime API + GPT-5.5 access
+- OpenAI API key with Realtime API + GPT-5.5 access (only required if you want to bypass the trial proxy)
 - (Optional but recommended) [SerpAPI](https://serpapi.com) key — enables fast Google search with answer-box short-circuit. Without one, factual queries fall through to OpenAI `deep_search` (slower; ~5–15 s per call).
 
-### Install
+#### Install
 
 ```bash
 brew install steipete/tap/peekaboo
@@ -465,7 +477,6 @@ npm install
 npx playwright install chromium
 swiftc -o helpers/record-audio helpers/record-audio.swift \
   -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia
-mkdir -p ~/.samuel && echo '{"apiKey": "sk-..."}' > ~/.samuel/config.json
 ```
 
 Grant macOS permissions:
@@ -473,10 +484,22 @@ Grant macOS permissions:
 - **System Settings → Privacy & Security → Accessibility** → add Samuel (needed for AX-tree reads + native input)
 
 ```bash
-npm run electron:dev
+npm run electron:dev      # development with hot reload
+# or
+npm run electron:build    # produces a DMG in dist-app/
 ```
 
 Say **"Hey Samuel"** and start talking.
+
+#### Bring your own key (optional)
+
+If you'd rather skip the trial proxy and pay OpenAI directly:
+
+```bash
+mkdir -p ~/.samuel && echo '{"apiKey": "sk-..."}' > ~/.books-reader.json
+```
+
+Or paste it into Settings → API Key after launching.
 
 To enable fast web search, hand Samuel a [SerpAPI](https://serpapi.com) key once via voice (he'll store it locally):
 
@@ -563,10 +586,12 @@ Yes, via the wraps/middleware pattern. A plugin can wrap any existing tool — i
 Three ways: (1) API-based search via SerpAPI, (2) AI-powered deep search via OpenAI, (3) real browser automation via Playwright where he opens a visible Chromium window, you sign in, and he reads/interacts with the page.
 
 **Is my data private?**
-Screen captures and audio are sent to OpenAI for processing. Memory, preferences, skills, plugins, and secrets are stored locally in `~/.samuel/`. Browser sessions run locally via Playwright.
+Yes, with caveats spelled out in [PRIVACY.md](./PRIVACY.md). The short version: every privacy capability is OFF by default; macOS asks you to grant the underlying system permission the first time each one is used. Memory, preferences, skills, plugins, and secrets stay on your Mac in `~/.samuel/`. Browser sessions run locally via Playwright. Voice and screen content is sent to OpenAI only when (and only because) you ask Samuel something that needs OpenAI to answer it. In trial mode, those requests pass through a thin Cloudflare proxy that does not store request content.
 
 **Is it free?**
-The code is MIT-licensed. You pay OpenAI API costs directly.
+Two paths:
+- **Trial mode** — the app ships with a free trial proxy that uses our OpenAI key, with daily per-installation rate limits. No credit card, no signup. Trial mode may be paused, throttled, or removed at any time per the [Terms](./TERMS.md).
+- **Bring-your-own-key** — paste your OpenAI API key in Settings. Samuel talks to OpenAI directly and applies no caps; you pay OpenAI's metered rates for whatever you use. The code itself is MIT-licensed.
 
 **Does it work on Windows or Linux?**
 Currently macOS only. Cross-platform is on the roadmap.

@@ -18,17 +18,32 @@ export function PrivacyPolicy({ onClose }: Props) {
 
         <div className="privacy-policy-body">
           <p className="privacy-policy-meta">
-            Last updated: 2026-05-17. This describes how the Samuel desktop
+            Last updated: 2026-06-06. This describes how the Samuel desktop
             app handles your data. We aim to be specific rather than aspirational
             — if any item below stops being true, we treat that as a bug.
           </p>
 
           <h4>1. Who runs Samuel</h4>
           <p>
-            Samuel is a local desktop app that runs entirely on your machine.
-            It does not have a backend service. It connects to third-party
-            APIs using API keys you provide.
+            Samuel is a desktop app that runs on your machine. It connects to
+            OpenAI to do its thinking, in one of two modes:
           </p>
+          <ul>
+            <li>
+              <strong>Bring-your-own-key (BYOK).</strong> If you paste an
+              OpenAI API key into Settings, the app talks to OpenAI directly
+              with that key. Nothing reaches the Samuel project's servers.
+            </li>
+            <li>
+              <strong>Trial mode.</strong> If you have not provided a key, a
+              short list of OpenAI endpoints is routed through the
+              <em> Samuel proxy</em>, a Cloudflare Worker operated by the Samuel
+              project. The proxy adds the OpenAI key on its way upstream and
+              applies daily rate limits, so trial users can use the app
+              without an OpenAI account. Section 8 below describes exactly
+              what the proxy sees and stores.
+            </li>
+          </ul>
 
           <h4>2. Third parties that receive your data</h4>
           <p>
@@ -179,6 +194,49 @@ export function PrivacyPolicy({ onClose }: Props) {
             When this policy changes, the &ldquo;Last updated&rdquo; date at
             the top changes with it. There is no separate notification
             channel — the policy ships with the app.
+          </p>
+
+          <h4>8. The Samuel trial proxy</h4>
+          <p>
+            When you run in trial mode, requests to the OpenAI Realtime,
+            Whisper, Chat Completions, and Responses endpoints are sent to
+            <code> samuel-proxy.boshenfeng.workers.dev</code> instead of
+            directly to OpenAI. The proxy then forwards them to OpenAI with
+            the project&rsquo;s API key.
+          </p>
+          <p>
+            On each request the proxy reads two things:
+          </p>
+          <ul>
+            <li>
+              <strong>Your installation ID</strong> &mdash; a UUID generated
+              the first time Samuel runs and stored at
+              <code> ~/.samuel/installation-id</code>. The proxy uses it as a
+              rate-limit bucket so behind-NAT users don&rsquo;t share quota.
+              It is not tied to any account, name, or device identifier.
+              <code> rm ~/.samuel/installation-id</code> resets it.
+            </li>
+            <li>
+              <strong>Your IP address</strong> &mdash; provided by Cloudflare
+              for routing. Used only as a secondary rate-limit bucket so a
+              single network can&rsquo;t drain the budget. Cloudflare may log
+              IPs per its own privacy policy.
+            </li>
+          </ul>
+          <p>
+            The proxy stores both as integer counters in a key-value store,
+            keyed by date and endpoint, that auto-expire after 48 hours. It
+            also tracks a rolling per-day total of estimated cost so the
+            project can pause the service if usage spikes. The proxy does
+            <strong> not</strong> persist the audio, screenshots, or text
+            content of your requests.
+          </p>
+          <p>
+            If you do not want the proxy to see your requests at all, paste
+            your own OpenAI key in Settings &rarr; API Key. The full source
+            of the proxy is in the <code>proxy/</code> directory of the
+            Samuel repository, including the Cloudflare configuration; you
+            can audit or self-host it.
           </p>
         </div>
       </div>

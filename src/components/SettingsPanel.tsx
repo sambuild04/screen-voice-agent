@@ -2,7 +2,9 @@ import { useState } from "react";
 import { invoke } from "../lib/invoke-bridge";
 import type { UIPreferences } from "../hooks/useUIPreferences";
 import { PrivacyPolicy } from "./PrivacyPolicy";
+import { TermsOfUse } from "./TermsOfUse";
 import { MemoryBrowser } from "./MemoryBrowser";
+import { ApiKeySection } from "./ApiKeySection";
 
 type ToggleKey =
   | "privacy.screen_watch"
@@ -25,6 +27,7 @@ interface Props {
 export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose }: Props) {
   const [clearing, setClearing] = useState<string | null>(null);
   const [policyOpen, setPolicyOpen] = useState(false);
+  const [termsOpen, setTermsOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportNote, setExportNote] = useState<string | null>(null);
@@ -125,6 +128,8 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
           <h3>Settings</h3>
           <button className="settings-close" onClick={onClose}>&times;</button>
         </div>
+
+        <ApiKeySection />
 
         <div className="settings-section">
           <div className="settings-section-title">Privacy Controls</div>
@@ -308,6 +313,9 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
           <button className="settings-link-btn" onClick={() => setPolicyOpen(true)}>
             Privacy Policy
           </button>
+          <button className="settings-link-btn" onClick={() => setTermsOpen(true)}>
+            Terms of Use
+          </button>
           <p className="settings-note">
             Voice, screen text, and tool inputs are sent to OpenAI when the
             agent is active. Memory and credentials are stored on this
@@ -317,6 +325,7 @@ export function SettingsPanel({ visible, prefs, onToggle, onResetPrefs, onClose 
         </div>
       </div>
       {policyOpen && <PrivacyPolicy onClose={() => setPolicyOpen(false)} />}
+      {termsOpen && <TermsOfUse onClose={() => setTermsOpen(false)} />}
       <MemoryBrowser visible={memoryOpen} onClose={() => setMemoryOpen(false)} />
     </div>
   );
