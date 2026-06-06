@@ -1,4 +1,20 @@
-# Samuel — the AI that works with you, not for you
+<p align="center">
+  <img src="docs/images/icon.png" alt="Samuel" width="200" />
+</p>
+
+<h1 align="center">Samuel — the AI that works with you, not for you</h1>
+
+<p align="center">
+  <a href="https://github.com/sambuild04/screen-voice-agent/releases/latest/download/Samuel-0.1.0-arm64.dmg">
+    <strong>↓ Download for Apple Silicon Mac (Samuel 0.1.0)</strong>
+  </a>
+  &nbsp;·&nbsp;
+  <a href="#quick-start">Install</a>
+  &nbsp;·&nbsp;
+  <a href="PRIVACY.md">Privacy</a>
+  &nbsp;·&nbsp;
+  <a href="TERMS.md">Terms</a>
+</p>
 
 A **voice-first AI companion for macOS**. Wake-word activated, speaks back in under 500 ms, sees your screen and hears your system audio (when you allow it), drives any app, browses the web like a human, and writes its own tools — and repairs them when they break. Open source, MIT licensed.
 
@@ -39,6 +55,14 @@ Think "ChatGPT Voice Mode that can actually see what you're doing" — or JARVIS
 - **No more session teardowns** — captured JPEGs are hard-capped to fit WebRTC's SCTP message limit (quality + width step-down), eliminating `INVALID_RANGE` reconnect loops.
 
 ---
+
+## Meet Samuel
+
+<p align="center">
+  <img src="docs/images/avatar.png" alt="Samuel — the avatar that lives on your Mac desktop" width="220" />
+</p>
+
+That's Samuel. He lives in a small floating window on your Mac, animates while you're talking, and stays out of the way the rest of the time. The avatar is rendered with [Rive](https://rive.app), so it's a few hundred kilobytes and runs at native frame rates.
 
 ## See It In Action
 
