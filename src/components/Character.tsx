@@ -65,7 +65,10 @@ export function Character({
   // inputs from React. Agent state is conveyed by the surrounding UI
   // (speech bubble thinking dots, listening waveform, character-glow CSS).
   const { RiveComponent } = useRive({
-    src: "/character.riv",
+    // Use a relative URL so this resolves under both dev (vite serves /
+    // from public/) and packaged Electron (file:// URLs treat a leading "/"
+    // as the literal filesystem root, which 404s).
+    src: "./character.riv",
     stateMachines: STATE_MACHINE,
     autoplay: true,
   });

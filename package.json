@@ -61,7 +61,13 @@
       "dist-electron/**/*",
       "dist-ui/**/*",
       "helpers/**/*",
-      "build/icon.png"
+      "build/icon.png",
+      "!**/playwright-core/.local-browsers/**/*",
+      "!**/playwright/.local-browsers/**/*",
+      "!**/.cache/ms-playwright/**/*",
+      "!**/puppeteer/.local-chromium/**/*",
+      "!**/{CHANGELOG.md,README.md,readme.md,*.test.js,*.test.ts,*.map}",
+      "!**/{test,tests,__tests__,docs,example,examples}/**/*"
     ],
     "extraResources": [
       {

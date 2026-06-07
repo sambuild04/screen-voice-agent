@@ -82,9 +82,15 @@ echo "[2/3] Signing + notarizing via electron-builder ..."
 echo "      (this uploads the DMG to Apple and waits for the notary ticket;"
 echo "       typical wait is 1-5 min)"
 echo
-npx electron-builder \
-  --mac \
-  --config.mac.notarize.teamId="$APPLE_TEAM_ID"
+
+# electron-builder >=26 reads the four notary credentials directly from env:
+#   APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER (notary auth)
+#   APPLE_TEAM_ID                                       (signing identity disambiguator)
+# The `mac.notarize` config field is just a boolean kill-switch in v26+; we
+# don't need to pass it because notarization auto-activates when the env
+# vars above are present.
+export APPLE_TEAM_ID
+npx electron-builder --mac
 
 # ---------- locate output ----------
 DMG="$(ls -t dist-app/Samuel-*.dmg 2>/dev/null | head -n 1 || true)"
@@ -96,9 +102,28 @@ fi
 # Try to locate the .app inside the build dir for codesign verification.
 APP="$(find dist-app -maxdepth 3 -name "Samuel.app" -type d 2>/dev/null | head -n 1 || true)"
 
+# ---------- notarize + staple the DMG envelope ----------
+# electron-builder notarizes the .app *before* wrapping it into a DMG, so the
+# DMG envelope itself is unsigned/unnotarized. End users opening the .app from
+# Applications work fine (the .app has its own stapled ticket), but mounting
+# the DMG triggers a slow online Gatekeeper check unless the DMG itself is
+# notarized + stapled. We submit a second notarytool round for the DMG so the
+# experience is offline-clean from download onward.
+echo
+echo "[3/4] Notarizing the DMG envelope (second round, ~1-3 min) ..."
+xcrun notarytool submit "$DMG" \
+  --key "$APPLE_API_KEY" \
+  --key-id "$APPLE_API_KEY_ID" \
+  --issuer "$APPLE_API_ISSUER" \
+  --wait 2>&1 | sed 's/^/    /'
+
+echo
+echo "    Stapling notarization ticket onto $DMG ..."
+xcrun stapler staple "$DMG" 2>&1 | sed 's/^/    /'
+
 # ---------- verification ----------
 echo
-echo "[3/3] Verifying signature and notarization ..."
+echo "[4/4] Verifying signature and notarization ..."
 echo
 
 if [ -n "$APP" ]; then
@@ -107,10 +132,11 @@ if [ -n "$APP" ]; then
   echo
 fi
 
-echo "--- spctl assessment of $DMG ---"
-spctl -a -t open --context context:primary-signature -vv "$DMG" 2>&1 | sed 's/^/    /' || true
-echo
-
+# NOTE: we deliberately don't run `spctl` against the DMG here. spctl predates
+# the modern notarization workflow and emits "rejected: Insufficient Context"
+# or "no usable signature" against stapled DMGs even when they're 100% valid.
+# `xcrun stapler validate` is Apple's canonical truth source for stapled DMGs;
+# if it reports success here, the DMG will pass Gatekeeper at user-open time.
 echo "--- stapler validate $DMG ---"
 xcrun stapler validate "$DMG" 2>&1 | sed 's/^/    /' || true
 echo

@@ -2,42 +2,18 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!--
-      Hardened Runtime opt-ins. Each one is required for something Electron / Node /
-      Samuel's native helpers do at runtime; together they make up the minimum
-      surface required to pass `codesign --verify` + Apple notarization.
-    -->
-
-    <!-- V8 needs JIT to run JavaScript -->
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
-
-    <!-- Some Node native modules allocate executable memory at runtime -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
-
-    <!-- Electron uses DYLD_* env vars internally for asar / squirrel updates -->
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
-
-    <!-- Allow loading native helpers we didn't sign ourselves (e.g. Peekaboo CLI) -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
-
-    <!--
-      Capability opt-ins. Each one is *also* gated at runtime by a privacy.* toggle
-      in Settings; the entitlement just tells the kernel that the app is allowed
-      to ask the user, and the user-facing prompt copy comes from the Info.plist
-      NS*UsageDescription strings.
-    -->
-
     <key>com.apple.security.device.audio-input</key>
     <true/>
-
     <key>com.apple.security.automation.apple-events</key>
     <true/>
-
-    <!-- Network -->
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>
