@@ -15,6 +15,7 @@
     "electron:dev": "npm run electron:compile && concurrently \"vite\" \"unset ELECTRON_RUN_AS_NODE && NODE_ENV=development electron dist-electron/main.js\"",
     "electron:build": "npm run ui:build && npm run electron:compile && electron-builder",
     "release": "scripts/release.sh",
+    "release:signed": "scripts/release-signed.sh",
     "cli:build": "tsc -p tsconfig.cli.json",
     "cli:start": "node dist/index.js",
     "cli:dev": "tsx src-cli/index.ts",
@@ -78,6 +79,10 @@
       "category": "public.app-category.productivity",
       "darkModeSupport": true,
       "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Samuel listens for the wake word and your voice — only when you turn on Voice Input or Audio Listening in Settings.",
         "NSScreenCaptureUsageDescription": "Samuel reads your screen to help with what you're working on — only when you turn on Screen Watch or Screen Read in Settings.",

@@ -1,15 +1,28 @@
 #!/usr/bin/env bash
-# Build Samuel and publish the resulting DMG(s) to a GitHub Release.
+# Build a *development / unsigned* Samuel DMG and publish it to a GitHub Release.
 #
 # Usage:
 #   scripts/release.sh                # version pulled from package.json
 #   scripts/release.sh v0.1.0         # explicit tag (must be vX.Y.Z)
 #
+# WHEN TO USE THIS SCRIPT vs `release:signed`:
+#   - This script (release.sh)       → ad-hoc signed DMG. Users see Gatekeeper's
+#                                       "Apple cannot verify…" dialog on first
+#                                       launch and must right-click → Open.
+#                                       Use for early dev / pre-Apple-enrollment.
+#   - `npm run release:signed`       → Developer ID-signed + Apple-notarized DMG.
+#                                       Zero Gatekeeper warning, true one-click
+#                                       install. Use for public releases once
+#                                       you've completed docs/release-signing.md.
+#
 # Prerequisites:
 #   - `gh` CLI authenticated against the target repo
-#   - `npm run electron:build` works locally (signs DMGs as ad-hoc when no
-#     Apple Developer ID is set; users will see Gatekeeper's
-#     "Apple cannot verify…" dialog on first launch — see README §Quick Start)
+#   - `npm run electron:build` works locally
+#
+# We force CSC_IDENTITY_AUTO_DISCOVERY=false so this script keeps producing an
+# unsigned DMG even after you install a Developer ID cert in your keychain.
+# That way `release` and `release:signed` always do exactly what their names
+# imply — no surprise behavior change just because a cert showed up.
 #
 # What it does:
 #   1. Reads the version from package.json (or accepts an override)
@@ -39,7 +52,9 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[release] building DMG for $TAG"
+echo "[release] building unsigned DMG for $TAG"
+echo "[release] (run \`npm run release:signed\` instead for a notarized build)"
+export CSC_IDENTITY_AUTO_DISCOVERY=false
 npm run electron:build
 
 shopt -s nullglob
