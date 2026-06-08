@@ -2,6 +2,10 @@
   <img src="docs/images/icon.png" alt="Samuel" width="200" />
 </p>
 
+<p align="center">
+  <a href="https://samuelai.app"><strong>samuelai.app</strong></a>
+</p>
+
 <h1 align="center">Samuel — the AI that works with you, not for you</h1>
 
 <p align="center">
