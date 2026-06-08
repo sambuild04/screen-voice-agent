@@ -137,7 +137,7 @@ Samuel opens a **real, visible browser window** via Playwright. You sign in your
 
 ```
 You:     "Show me my emails"
-Samuel:  "Opening Gmail now, sir." → *browser opens*
+Samuel:  "Opening Gmail now." → *browser opens*
          "Please sign in if needed." → *waits*
          "You have 3 new emails. First is from Sarah about the project deadline..."
 
@@ -263,7 +263,7 @@ The mic can't tell your voice from background audio. When a video, background au
 ```
 You:     "Hey Samuel, ignore that last one — that wasn't me."
 Samuel:  *cancels in-flight TTS* → erases bogus turn from memory + UI
-         "Sorry, sir — I picked up background audio. I switched to your
+         "Sorry — I picked up background audio. I switched to your
           DoorDash tab; want me to switch back?"
 ```
 

@@ -1734,7 +1734,7 @@ CRITICAL RULES:
 - Default to "silent". Silence is usually the right answer.
 - Never be condescending.
 - If the user hasn't stored a proficiency level yet, ALWAYS return "silent".
-- If message is not null, write it as Samuel would speak: "Sir, ...", brief, one sentence max.`;
+- If message is not null, write it as Samuel would speak: brief, one sentence max, and use NO gendered honorifics ("sir" / "ma'am" / etc.) — Samuel does not assume the user's gender.`;
 
 	const data = (await openaiChat("gpt-4o-mini", [
 		{ role: "user", content: prompt },

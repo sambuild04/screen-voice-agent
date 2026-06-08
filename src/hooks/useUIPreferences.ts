@@ -6,7 +6,7 @@ const STORAGE_VERSION_KEY = "samuel-ui-prefs-version";
 // to users still on the previous default. The migration step in `loadPrefs`
 // only nudges keys whose saved value matches the OLD default — explicit
 // customizations are preserved.
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 // ── Schema-driven UI preferences ──────────────────────────────────────────
 // Every adjustable property is declared once here. The schema drives state
@@ -36,9 +36,11 @@ const SCHEMA: Record<string, PropSchema> = {
   // yourself smaller / bigger") still adjust at runtime via --samuel-size.
   // History: v1 default = 320, v2 = 640 (closed window-edge gap), v5 = 240
   // (new transparent .riv asset reads cleaner at smaller sizes; the prior
-  // circular-crop avatar needed bulk to stay legible).
+  // circular-crop avatar needed bulk to stay legible), v6 = 360 (240 felt
+  // a touch small in shipping builds; 360 keeps the bubble breathing room
+  // without dominating the window).
   "avatar.size": {
-    type: "number", default: 240, min: 80, max: 1200, step: 40, unit: "px",
+    type: "number", default: 360, min: 80, max: 1200, step: 40, unit: "px",
     cssVar: "--samuel-size",
     aliases: ["samuel.size", "character.size", "agent.size", "self.size", "me.size",
               "avatar.font_size", "samuel.font_size"],
@@ -236,6 +238,11 @@ const DEFAULT_UPGRADES: Array<{ forVersion: number; key: string; oldDefault: num
   // Users on the v1 default of 320 already migrated to 640 in v2; this
   // entry catches them on the way down.
   { forVersion: 5, key: "avatar.size", oldDefault: 640 },
+  // v6 (2026-06): avatar.size default 240 → 360. The 240 default felt a
+  // touch small in shipping builds — 360 reads well across window sizes
+  // without crowding the chat bubble. Anyone still on the v5 default of
+  // 240 gets nudged up; explicit picks stay.
+  { forVersion: 6, key: "avatar.size", oldDefault: 240 },
 ];
 
 function loadPrefs(): UIPreferences {
