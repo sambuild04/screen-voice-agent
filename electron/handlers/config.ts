@@ -75,9 +75,21 @@ export async function create_ephemeral_key(): Promise<string> {
 // Persist a user-provided OpenAI key into ~/.books-reader.json. Once set,
 // openaiFetch() routes directly to OpenAI with this key, bypassing the
 // trial proxy. Empty/whitespace value clears the key (back to trial mode).
-export async function set_user_api_key(args: { apiKey: string }): Promise<{ ok: boolean }> {
+//
+// IMPORTANT: handleInvoke() in handlers/index.ts converts every incoming
+// arg key from camelCase to snake_case before calling the handler. So an
+// `invoke("set_user_api_key", { apiKey: key })` call from the renderer
+// arrives here as `{ api_key: key }`. Read snake_case first; accept the
+// camelCase form too as a defensive belt-and-suspenders for any caller
+// that bypasses the renderer bridge (tests, migration code, future code).
+//
+// This was a silent footgun that broke BYOK end-to-end for every user:
+// the handler used to read `args.apiKey`, got undefined, treated it as
+// "empty -> clear key", and silently truncated the user's saved key out
+// of the config file on every Save click. Stay defensive here.
+export async function set_user_api_key(args: { api_key?: string; apiKey?: string }): Promise<{ ok: boolean }> {
 	const configPath = join(homedir(), ".books-reader.json");
-	const trimmed = (args.apiKey ?? "").trim();
+	const trimmed = (args.api_key ?? args.apiKey ?? "").trim();
 
 	let raw: Record<string, unknown> = {};
 	if (existsSync(configPath)) {
