@@ -38,25 +38,37 @@ interface RouteLimit {
 	approxCostUsd: number;
 }
 
+// Per-route trial limits. The global DAILY_BUDGET_USD circuit breaker (set as
+// a Cloudflare secret, default $10) is still enforced regardless of these,
+// so a stuck-in-a-loop client can't burn unbounded money — when the daily
+// USD spend exceeds the budget, every route returns 429 budget_exceeded.
+//
+// History: initial caps (3/30/100/5) were tuned for "let a curious user kick
+// the tires once or twice and then go BYOK". They turned out to be way too
+// tight for active dev iteration and even modest multi-session usage. Bumped
+// roughly 100-200x to be effectively unlimited for any single-user workflow,
+// while leaving the per-IP secondary-defense numbers proportionally higher so
+// shared-NAT cohorts don't trip the wrong limit. Trim back later by lowering
+// individual rows; the per-route shape stays the same.
 const LIMITS: Record<string, RouteLimit> = {
 	"/v1/realtime/client_secrets": {
-		perInstallationPerDay: 3,
-		perIpPerDay: 15,
+		perInstallationPerDay: 500,
+		perIpPerDay: 2000,
 		approxCostUsd: 1.5,
 	},
 	"/v1/audio/transcriptions": {
-		perInstallationPerDay: 30,
-		perIpPerDay: 200,
+		perInstallationPerDay: 5000,
+		perIpPerDay: 20000,
 		approxCostUsd: 0.01,
 	},
 	"/v1/chat/completions": {
-		perInstallationPerDay: 100,
-		perIpPerDay: 600,
+		perInstallationPerDay: 10000,
+		perIpPerDay: 50000,
 		approxCostUsd: 0.005,
 	},
 	"/v1/responses": {
-		perInstallationPerDay: 5,
-		perIpPerDay: 30,
+		perInstallationPerDay: 1000,
+		perIpPerDay: 5000,
 		approxCostUsd: 0.5,
 	},
 };
