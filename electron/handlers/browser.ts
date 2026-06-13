@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface, type Interface } from "node:readline";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { app } from "electron";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -23,24 +25,82 @@ const pending = new Map<string, PendingRequest>();
 
 const COMMAND_TIMEOUT_MS = 60_000;
 
-function resolveProjectRoot(): string {
-	let dir = process.cwd();
-	if (dir.endsWith("electron")) {
-		dir = join(dir, "..");
-	}
-	return dir;
+// Resolve the path to the compiled browser-agent script.
+//
+// Layout, after `tsc -p electron/tsconfig.json`, is:
+//   <appPath>/dist-electron/handlers/browser.js   (this file at runtime)
+//   <appPath>/dist-electron/lib/browser-agent.js  (the sidecar entry)
+//
+// In dev `__dirname` is `<repo>/dist-electron/handlers`, in packaged it's
+// inside `Samuel.app/Contents/Resources/app.asar/dist-electron/handlers`.
+// `path.join(__dirname, "..", "lib", "browser-agent.js")` works for both
+// because the `dist-electron/` shape is preserved into the asar.
+function resolveAgentPath(): string {
+	return join(__dirname, "..", "lib", "browser-agent.js");
 }
 
+function failAllPending(err: Error): void {
+	for (const [id, req] of pending) {
+		clearTimeout(req.timer);
+		req.reject(err);
+		pending.delete(id);
+	}
+}
+
+// Spawn the sidecar via Electron's bundled Node runtime — `process.execPath`
+// is the Electron binary, and `ELECTRON_RUN_AS_NODE=1` makes it run as plain
+// Node and execute the JS file we hand it. This frees us from depending on
+// `npx`/`tsx`/`node` being on the system PATH.
+//
+// The previous implementation did `spawn("npx", ["tsx", "src/lib/browser-agent.ts"])`
+// which crashed the entire main process with `spawn npx ENOENT` on every
+// packaged install: GUI-launched .app bundles on macOS get a minimal PATH
+// (`/usr/bin:/bin:/usr/sbin:/sbin`) that does not include Homebrew's
+// `/opt/homebrew/bin` where most users' Node lives. Even if `npx` were
+// found, `src/lib/browser-agent.ts` is a TypeScript source file that ships
+// only in the dev tree, not in the packaged `.app`. The new path bundles a
+// compiled JS copy at `dist-electron/lib/browser-agent.js` and runs it with
+// the Electron binary that's guaranteed to be there.
 function ensureRunning(): void {
 	if (child && child.exitCode === null) return;
 
-	console.error("[browser] spawning browser-agent via npx tsx...");
-	const projectRoot = resolveProjectRoot();
-	console.error(`[browser] project root: ${projectRoot}`);
+	const agentPath = resolveAgentPath();
+	console.error(`[browser] spawning agent: ${agentPath} (via ELECTRON_RUN_AS_NODE)`);
 
-	const proc = spawn("npx", ["tsx", "src/lib/browser-agent.ts"], {
-		cwd: projectRoot,
-		stdio: ["pipe", "pipe", "pipe"],
+	let proc: ChildProcess;
+	try {
+		proc = spawn(process.execPath, [agentPath], {
+			cwd: tmpdir(),
+			stdio: ["pipe", "pipe", "pipe"],
+			env: {
+				...process.env,
+				ELECTRON_RUN_AS_NODE: "1",
+				// Drop GUI-related env so the spawned Node can't accidentally
+				// try to open a window or attach to the main app's renderer.
+				ELECTRON_NO_ATTACH_CONSOLE: "1",
+			},
+		});
+	} catch (err) {
+		// Synchronous failure (rare — usually only when execPath itself is
+		// missing). Convert to a normal rejected request rather than letting
+		// the throw escape and crash the main process.
+		const msg = err instanceof Error ? err.message : String(err);
+		console.error(`[browser] sync spawn failure: ${msg}`);
+		throw new Error(`Failed to start browser agent: ${msg}`);
+	}
+
+	// CRITICAL: a Node ChildProcess emits `error` *asynchronously* when the
+	// binary can't be spawned (ENOENT, EACCES, …) — `spawn()` itself returns
+	// a normal-looking ChildProcess object. If nothing listens for `error`,
+	// Electron's default uncaught-exception handler kills the whole main
+	// process. This is exactly how the original `spawn("npx", …)` crashed
+	// the app for every packaged user. Always attach an `error` listener
+	// before doing anything else with the child.
+	proc.on("error", (err: Error) => {
+		console.error(`[browser] spawn error: ${err.message}`);
+		failAllPending(new Error(`Browser agent failed to start: ${err.message}`));
+		child = null;
+		rl = null;
 	});
 
 	child = proc;
@@ -71,16 +131,12 @@ function ensureRunning(): void {
 
 	proc.on("exit", (code) => {
 		console.error(`[browser] child process exited (code=${code})`);
-		for (const [id, req] of pending) {
-			clearTimeout(req.timer);
-			req.reject(new Error("Browser agent process exited"));
-			pending.delete(id);
-		}
+		failAllPending(new Error("Browser agent process exited"));
 		child = null;
 		rl = null;
 	});
 
-	console.error(`[browser] agent started (pid=${proc.pid})`);
+	console.error(`[browser] agent started (pid=${proc.pid}, packaged=${app.isPackaged})`);
 }
 
 // ── Public API ──────────────────────────────────────────────────────────
@@ -89,10 +145,17 @@ export async function browser_command(
 	action: string,
 	params: Record<string, unknown>,
 ): Promise<BrowserResult> {
-	ensureRunning();
+	try {
+		ensureRunning();
+	} catch (err) {
+		// Don't let spawn failures crash the main process — surface them as
+		// a normal failed result that the LLM/plugin can react to.
+		const msg = err instanceof Error ? err.message : String(err);
+		return { ok: false, data: { error: msg } };
+	}
 
 	if (!child?.stdin?.writable) {
-		throw new Error("Browser agent not running");
+		return { ok: false, data: { error: "Browser agent not running (stdin not writable)" } };
 	}
 
 	const id = `req_${Date.now()}`;

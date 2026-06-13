@@ -7,6 +7,16 @@
  *
  * Runs as a sidecar process. Receives JSON commands on stdin,
  * returns JSON results on stdout.
+ *
+ * Lives under electron/ (not src/lib/) so it gets compiled to
+ * dist-electron/lib/browser-agent.js as part of `npm run electron:compile`,
+ * and ships inside the packaged app. Spawned by handlers/browser.ts via
+ * `process.execPath` + ELECTRON_RUN_AS_NODE=1 — i.e. Electron's bundled
+ * Node runtime — so we don't depend on the host system having `npx`/`tsx`
+ * (or any Node) on PATH. GUI-launched .app bundles on macOS get a minimal
+ * PATH (/usr/bin:/bin:/usr/sbin:/sbin) that omits Homebrew's /opt/homebrew/bin
+ * where most users' Node lives, so the previous `spawn("npx", ...)` form
+ * crashed the main process with ENOENT on every packaged install.
  */
 
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
