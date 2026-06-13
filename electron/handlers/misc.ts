@@ -11,7 +11,18 @@ import { homedir } from "node:os";
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+// In a packaged macOS .app the `extraResources` declaration in package.json
+// copies the helpers/ directory to `Samuel.app/Contents/Resources/helpers/`
+// (i.e. `process.resourcesPath/helpers/`). We have to look there first
+// because the `__dirname/../../helpers/` fallback would resolve inside
+// `app.asar` — and execFileSync against a path inside an asar archive
+// fails with ENOENT (the OS exec syscall doesn't know about asar).
+// In dev, process.resourcesPath points at Electron's own bundled resources
+// dir which doesn't contain our helpers, so the check no-ops and we fall
+// through to the cwd / __dirname paths that work in dev.
 function findHelper(name: string): string {
+	const fromResources = join(process.resourcesPath, "helpers", name);
+	if (existsSync(fromResources)) return fromResources;
 	const fromCwd = join(process.cwd(), "helpers", name);
 	if (existsSync(fromCwd)) return fromCwd;
 	const fromDir = join(__dirname, "..", "..", "helpers", name);

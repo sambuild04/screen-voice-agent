@@ -6,8 +6,10 @@ import { getWindowRef } from "../window-ref.js";
 import { openaiFetch } from "./openai-client.js";
 
 const MAX_TURNS = 30;
-const VIEWPORT_W = 1280;
-const VIEWPORT_H = 900;
+// Resampling width for native-mode screenshots before sending to the model.
+// 1280 is wide enough that the model can resolve normal UI text but small
+// enough to keep the JPEG payload under a few hundred KB. Coordinate output
+// from the model is then scaled back up by `scaleX`/`scaleY` to real pixels.
 const NATIVE_W = 1280;
 
 // ── Types ───────────────────────────────────────────────────────────────
@@ -38,16 +40,19 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 
 	const initSs = await takeBrowserScreenshot();
 
+	// GA computer-use wire shape: tool selector "computer" with no
+	// display_width/display_height/environment — the model reads dimensions
+	// from the screenshot itself. The earlier shape (computer_use_preview +
+	// display_width + display_height + environment) only works against the
+	// computer-use-preview model; mixing those preview-only fields with the
+	// GA "computer" selector returns
+	//   "Unknown parameter: 'tools[0].display_width'"
+	// which throws and bubbles up as a tool-call failure to the user.
+	// See https://openai.github.io/openai-agents-python/tools/ for the
+	// model→wire-shape matrix.
 	const firstBody = {
 		model: "gpt-5.5",
-		tools: [
-			{
-				type: "computer",
-				display_width: VIEWPORT_W,
-				display_height: VIEWPORT_H,
-				environment: "browser",
-			},
-		],
+		tools: [{ type: "computer" }],
 		input: [
 			{
 				role: "user",
@@ -102,14 +107,7 @@ export async function cua_run(task: string, url?: string): Promise<CuaResult> {
 
 		const followBody = {
 			model: "gpt-5.5",
-			tools: [
-				{
-					type: "computer",
-					display_width: VIEWPORT_W,
-					display_height: VIEWPORT_H,
-					environment: "browser",
-				},
-			],
+			tools: [{ type: "computer" }],
 			previous_response_id: prevRespId,
 			input: [
 				{
@@ -163,14 +161,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 
 		const firstBody = {
 			model: "gpt-5.5",
-			tools: [
-				{
-					type: "computer",
-					display_width: NATIVE_W,
-					display_height: screenshotH,
-					environment: "mac",
-				},
-			],
+			tools: [{ type: "computer" }],
 			input: [
 				{
 					role: "user",
@@ -227,14 +218,7 @@ export async function cua_run_native(task: string, app?: string): Promise<CuaRes
 
 			const followBody = {
 				model: "gpt-5.5",
-				tools: [
-					{
-						type: "computer",
-						display_width: NATIVE_W,
-						display_height: screenshotH,
-						environment: "mac",
-					},
-				],
+				tools: [{ type: "computer" }],
 				previous_response_id: prevRespId,
 				input: [
 					{
@@ -551,7 +535,22 @@ async function executeCuaAction(action: Record<string, unknown>): Promise<void> 
 	}
 }
 
+// Locate `helpers/native-input.swift` in both dev and packaged-app layouts.
+//
+// Packaged: `extraResources` in package.json copies the entire `helpers/`
+// dir to `Samuel.app/Contents/Resources/helpers/`. We MUST find it there
+// rather than at `__dirname/../../helpers/...` (which would resolve inside
+// `app.asar`) because the swift binary at `/usr/bin/swift` can't read paths
+// inside an asar archive — it'll get ENOENT and CUA fails silently.
+//
+// Dev: `process.resourcesPath` points at Electron's own resources dir
+// (.../node_modules/electron/dist/Electron.app/Contents/Resources/) which
+// does NOT contain our helpers, so the existsSync fails and we fall through
+// to the cwd/__dirname checks that work in dev.
 function findNativeInputHelper(): string {
+	const fromResources = join(process.resourcesPath, "helpers", "native-input.swift");
+	if (existsSync(fromResources)) return fromResources;
+
 	const fromCwd = join(process.cwd(), "helpers", "native-input.swift");
 	if (existsSync(fromCwd)) return fromCwd;
 

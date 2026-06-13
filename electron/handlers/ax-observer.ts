@@ -18,7 +18,14 @@ type AXEventListener = (event: AXEvent) => void;
 let observerProc: ChildProcess | null = null;
 const listeners: Set<AXEventListener> = new Set();
 
+// Same packaged-app helper resolution as misc.ts / cua.ts:
+// `process.resourcesPath/helpers/<name>` is where extraResources stages our
+// helpers in Samuel.app/Contents/Resources/. We must find it there (not
+// inside app.asar via __dirname) because spawn against an asar path fails
+// — the OS exec syscall doesn't understand asar virtualization.
 function findHelper(name: string): string {
+	const fromResources = join(process.resourcesPath, "helpers", name);
+	if (existsSync(fromResources)) return fromResources;
 	const fromCwd = join(process.cwd(), "helpers", name);
 	if (existsSync(fromCwd)) return fromCwd;
 	const fromDir = join(__dirname, "..", "..", "helpers", name);
