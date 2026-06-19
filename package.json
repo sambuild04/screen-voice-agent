@@ -1,6 +1,8 @@
 {
   "name": "books-reader",
   "version": "0.1.0",
+  "license": "MIT",
+  "author": "Sam Feng <boshenfeng@gmail.com>",
   "description": "Read Apple Books pages via Peekaboo + vision OCR",
   "type": "module",
   "main": "dist-electron/main.js",
