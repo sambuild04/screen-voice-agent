@@ -3,11 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2025-08-01"
 
 # Daily total spend cap in USD. Hard kill switch — when global trial
-# spend hits this for the day, all proxy requests return 503 until
-# midnight UTC. Keep this conservative until you've watched real-world
-# usage for a few days, then raise.
+# spend hits this for the day, all proxy requests return 429 until
+# midnight UTC. Set to "0" to fully disable the free trial (every
+# trial-mode request will immediately hit budget_exceeded); users who
+# have added their own OpenAI key in Settings are unaffected.
 [vars]
-DAILY_BUDGET_USD = "10"
+DAILY_BUDGET_USD = "0"
 
 # KV namespace for per-installation / per-IP rate limit counters and the
 # global spend ledger. Create with:

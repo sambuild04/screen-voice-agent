@@ -474,7 +474,7 @@ Toggle screen watching and audio listening directly from the settings button. Al
    *"Apple cannot verify that this app is free from malware."*
    To get past it once: right-click `Samuel.app` in Applications → **Open** → **Open** in the dialog. Subsequent launches don't ask again. (Notarization is on the roadmap; it removes this step.)
 4. Grant the macOS permission prompts that appear the first time you turn on a privacy capability in **Settings → Privacy Controls** (microphone, screen recording, accessibility). Each toggle is OFF by default; nothing reaches OpenAI until you turn it on.
-5. **No OpenAI key required to start** — Samuel's free trial proxy lets you try it immediately. For unlimited use, paste your own key in **Settings → API Key**; the app then talks to OpenAI directly and never contacts the proxy. See [PRIVACY.md](./PRIVACY.md) for the full data-flow breakdown.
+5. **Add your OpenAI API key** in **Settings → API Key** on first launch. Samuel talks to OpenAI directly using your key — nothing routes through our servers. The free trial proxy is currently paused. See [PRIVACY.md](./PRIVACY.md) for the full data-flow breakdown.
 
 Say **"Hey Samuel"** and start talking.
 
@@ -484,7 +484,7 @@ Say **"Hey Samuel"** and start talking.
 
 - macOS 14+ (Sonoma or later)
 - Node.js 20+
-- OpenAI API key with Realtime API + GPT-5.5 access (only required if you want to bypass the trial proxy)
+- OpenAI API key with Realtime API + GPT-5.5 access (required — the free trial proxy is currently paused)
 - (Optional but recommended) [SerpAPI](https://serpapi.com) key — enables fast Google search with answer-box short-circuit. Without one, factual queries fall through to OpenAI `deep_search` (slower; ~5–15 s per call).
 
 #### Install
@@ -511,9 +511,9 @@ npm run electron:build    # produces a DMG in dist-app/
 
 Say **"Hey Samuel"** and start talking.
 
-#### Bring your own key (optional)
+#### Add your OpenAI key
 
-If you'd rather skip the trial proxy and pay OpenAI directly:
+Samuel needs your own OpenAI API key to run (the free trial proxy is currently paused):
 
 ```bash
 mkdir -p ~/.samuel && echo '{"apiKey": "sk-..."}' > ~/.books-reader.json
@@ -606,12 +606,12 @@ Yes, via the wraps/middleware pattern. A plugin can wrap any existing tool — i
 Three ways: (1) API-based search via SerpAPI, (2) AI-powered deep search via OpenAI, (3) real browser automation via Playwright where he opens a visible Chromium window, you sign in, and he reads/interacts with the page.
 
 **Is my data private?**
-Yes, with caveats spelled out in [PRIVACY.md](./PRIVACY.md). The short version: every privacy capability is OFF by default; macOS asks you to grant the underlying system permission the first time each one is used. Memory, preferences, skills, plugins, and secrets stay on your Mac in `~/.samuel/`. Browser sessions run locally via Playwright. Voice and screen content is sent to OpenAI only when (and only because) you ask Samuel something that needs OpenAI to answer it. In trial mode, those requests pass through a thin Cloudflare proxy that does not store request content.
+Yes, with caveats spelled out in [PRIVACY.md](./PRIVACY.md). The short version: every privacy capability is OFF by default; macOS asks you to grant the underlying system permission the first time each one is used. Memory, preferences, skills, plugins, and secrets stay on your Mac in `~/.samuel/`. Browser sessions run locally via Playwright. Voice and screen content is sent to OpenAI only when (and only because) you ask Samuel something that needs OpenAI to answer it — with your own key, those requests go directly from your Mac to OpenAI without passing through our servers. The free trial proxy is currently paused.
 
 **Is it free?**
-Two paths:
-- **Trial mode** — the app ships with a free trial proxy that uses our OpenAI key, with daily per-installation rate limits. No credit card, no signup. Trial mode may be paused, throttled, or removed at any time per the [Terms](./TERMS.md).
-- **Bring-your-own-key** — paste your OpenAI API key in Settings. Samuel talks to OpenAI directly and applies no caps; you pay OpenAI's metered rates for whatever you use. The code itself is MIT-licensed.
+The code is MIT-licensed and free to use, modify, and self-host. You'll need your own OpenAI API key — paste it into **Settings → API Key** on first launch, and Samuel talks to OpenAI directly at OpenAI's metered rates for whatever you use.
+
+The free trial proxy that previously shipped with Samuel is currently paused per the [Terms](./TERMS.md); the mechanism is still in the codebase and can be re-enabled if trial mode returns.
 
 **Does it work on Windows or Linux?**
 Currently macOS only. Cross-platform is on the roadmap.
