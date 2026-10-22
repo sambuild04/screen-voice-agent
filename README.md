@@ -8,6 +8,8 @@
 
 <h1 align="center">Samuel — the AI that works with you, not for you</h1>
 
+current building a mini new version of this: https://github.com/sambuild04/samuel-desktop-agent
+
 <p align="center">
   <a href="https://github.com/sambuild04/screen-voice-agent/releases/latest/download/Samuel-0.1.0-arm64.dmg">
     <strong>↓ Download for Apple Silicon Mac (Samuel 0.1.0)</strong>
